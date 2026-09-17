@@ -1,0 +1,280 @@
+{
+  "nodes": [
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 450.0,
+      "y": -100.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Get Variable",
+      "color": "#6a5a8a",
+      "x": 150.0,
+      "y": -100.0,
+      "description": "**Get NAME.**  Reads a variable.",
+      "dynamic": false,
+      "metadata": {
+        "template": "Get Variable",
+        "qualname": null,
+        "import_module": null,
+        "kind": "get",
+        "call": null,
+        "category": "Built-ins/Variables",
+        "id": "get1"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Name",
+              "string",
+              "Variable name",
+              "total"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Value",
+              "any",
+              "The value"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Int Literal",
+      "color": "#c08a3a",
+      "x": -500.0,
+      "y": -100.0,
+      "description": "**Integer.**",
+      "dynamic": true,
+      "metadata": {
+        "template": "Int Literal",
+        "qualname": null,
+        "import_module": null,
+        "kind": "call",
+        "call": "{Value}",
+        "category": "Built-ins/Values",
+        "id": "lit"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "int",
+              "Integer",
+              "42"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "int",
+              "Int"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Set Variable",
+      "color": "#6a5a8a",
+      "x": -200.0,
+      "y": -100.0,
+      "description": "**Set NAME = VALUE.**  Assigns to a variable.",
+      "dynamic": false,
+      "metadata": {
+        "template": "Set Variable",
+        "qualname": null,
+        "import_module": null,
+        "kind": "set",
+        "call": null,
+        "category": "Built-ins/Variables",
+        "id": "set1"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Name",
+              "string",
+              "Variable name",
+              "total"
+            ],
+            [
+              "Value",
+              "any",
+              "Value",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from_node": 1,
+      "from_socket": "Path Out",
+      "to_node": 0,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 3,
+      "from_socket": "Path Out",
+      "to_node": 1,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 2,
+      "from_socket": "Path Out",
+      "to_node": 3,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 1,
+      "from_socket": "Value",
+      "to_node": 0,
+      "to_socket": "Value"
+    },
+    {
+      "from_node": 2,
+      "from_socket": "Result",
+      "to_node": 3,
+      "to_socket": "Value"
+    }
+  ]
+}

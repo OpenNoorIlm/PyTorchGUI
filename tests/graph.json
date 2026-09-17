@@ -1,0 +1,230 @@
+{
+  "nodes": [
+    {
+      "title": "End",
+      "color": "#5c2e2e",
+      "x": 682.3799341226257,
+      "y": -96.72749732588261,
+      "description": "Exit point of the pipeline.",
+      "dynamic": false,
+      "metadata": {
+        "template": "End"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Prev",
+              "path",
+              "Last node in the chain",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 351.96565122182295,
+      "y": -85.59955515564832,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "input",
+      "color": "#6a5a8a",
+      "x": 36.95928824903723,
+      "y": -130.11132383658543,
+      "description": "**input(prompt).**  Pop a dialog and read the typed value.",
+      "dynamic": false,
+      "metadata": {
+        "template": "input"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Prompt",
+              "string",
+              "Prompt",
+              "'Enter: '"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "string",
+              "Text"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Start",
+      "color": "#2e5c2e",
+      "x": -256.0,
+      "y": -119.0,
+      "description": "Entry point of the pipeline.",
+      "dynamic": false,
+      "metadata": {
+        "template": "Start"
+      },
+      "sections": [
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Next",
+              "path",
+              "First node in the chain"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from_node": 1,
+      "from_socket": "Path Out",
+      "to_node": 0,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 2,
+      "from_socket": "Result",
+      "to_node": 1,
+      "to_socket": "Value"
+    },
+    {
+      "from_node": 2,
+      "from_socket": "Path Out",
+      "to_node": 1,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 3,
+      "from_socket": "Path Out",
+      "to_node": 2,
+      "to_socket": "Path In"
+    }
+  ]
+}

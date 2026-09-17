@@ -1,0 +1,155 @@
+{
+  "nodes": [
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 250.0,
+      "y": -100.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "List Comp",
+      "color": "#6a5a8a",
+      "x": -200.0,
+      "y": -100.0,
+      "description": "**[expr for x in it if cond].**",
+      "dynamic": false,
+      "metadata": {
+        "template": "List Comp",
+        "qualname": null,
+        "import_module": null,
+        "kind": "comprehension_list",
+        "call": null,
+        "category": "Built-ins/Comprehensions",
+        "id": "lc"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Expr",
+              "string",
+              "Expression",
+              "x*x"
+            ],
+            [
+              "Var",
+              "string",
+              "Loop var",
+              "x"
+            ],
+            [
+              "Iterable",
+              "any",
+              "Iterable",
+              "range(5)"
+            ],
+            [
+              "Condition",
+              "string",
+              "Filter",
+              ""
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "any",
+              "List"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from_node": 1,
+      "from_socket": "Path Out",
+      "to_node": 0,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 1,
+      "from_socket": "Result",
+      "to_node": 0,
+      "to_socket": "Value"
+    }
+  ]
+}

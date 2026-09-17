@@ -1,0 +1,137 @@
+{
+  "nodes": [
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 150.0,
+      "y": 0.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "String Literal",
+      "color": "#c08a3a",
+      "x": -200.0,
+      "y": 0.0,
+      "description": "**String.**  Type text in the Value field.",
+      "dynamic": true,
+      "metadata": {
+        "template": "String Literal",
+        "qualname": null,
+        "import_module": null,
+        "kind": "call",
+        "call": "{Value}",
+        "category": "Built-ins/Values",
+        "id": "s"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "string",
+              "Text",
+              "'Hello, world!'"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "string",
+              "The string"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from_node": 1,
+      "from_socket": "Path Out",
+      "to_node": 0,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 1,
+      "from_socket": "Result",
+      "to_node": 0,
+      "to_socket": "Value"
+    }
+  ]
+}

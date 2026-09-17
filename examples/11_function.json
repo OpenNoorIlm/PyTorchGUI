@@ -1,0 +1,345 @@
+{
+  "nodes": [
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 500.0,
+      "y": -200.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Call Function",
+      "color": "#6a5a8a",
+      "x": 200.0,
+      "y": -200.0,
+      "description": "**NAME(*args).**",
+      "dynamic": false,
+      "metadata": {
+        "template": "Call Function",
+        "qualname": null,
+        "import_module": null,
+        "kind": "call_by_name",
+        "call": null,
+        "category": "Built-ins/Functions",
+        "id": "call"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Name",
+              "string",
+              "Name",
+              "square"
+            ],
+            [
+              "Args",
+              "any",
+              "Args",
+              "[7]"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "any",
+              "Return"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Return",
+      "color": "#6a5a8a",
+      "x": -384.0,
+      "y": 254.0,
+      "description": "**return VALUE.**",
+      "dynamic": false,
+      "metadata": {
+        "template": "Return",
+        "qualname": null,
+        "import_module": null,
+        "kind": "return",
+        "call": null,
+        "category": "Built-ins/Functions",
+        "id": "ret"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Binary Op",
+      "color": "#6a5a8a",
+      "x": -384.0,
+      "y": 2.0,
+      "description": "**A op B.**",
+      "dynamic": false,
+      "metadata": {
+        "template": "Binary Op",
+        "qualname": null,
+        "import_module": null,
+        "kind": "binop",
+        "call": null,
+        "category": "Built-ins/Operators",
+        "id": "op"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "A",
+              "any",
+              "A",
+              "n"
+            ],
+            [
+              "Op",
+              "string",
+              "Operator",
+              "'*'"
+            ],
+            [
+              "B",
+              "any",
+              "B",
+              "n"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "any",
+              "Result"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Define Function",
+      "color": "#6a5a8a",
+      "x": -400.0,
+      "y": -200.0,
+      "description": "**def NAME(args):** body via blocks.",
+      "dynamic": false,
+      "metadata": {
+        "template": "Define Function",
+        "qualname": null,
+        "import_module": null,
+        "kind": "def",
+        "call": null,
+        "category": "Built-ins/Functions",
+        "id": "df"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Name",
+              "string",
+              "Name",
+              "square"
+            ],
+            [
+              "Args",
+              "string",
+              "Args",
+              "n"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from_node": 1,
+      "from_socket": "Path Out",
+      "to_node": 0,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 4,
+      "from_socket": "Path Out",
+      "to_node": 1,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 1,
+      "from_socket": "Result",
+      "to_node": 0,
+      "to_socket": "Value"
+    },
+    {
+      "from_node": 3,
+      "from_socket": "Result",
+      "to_node": 2,
+      "to_socket": "Value"
+    }
+  ]
+}

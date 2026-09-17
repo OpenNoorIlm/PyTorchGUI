@@ -1,0 +1,412 @@
+{
+  "nodes": [
+    {
+      "title": "Start",
+      "color": "#2e5c2e",
+      "x": -900.0,
+      "y": -150.0,
+      "description": "Entry point of the pipeline.",
+      "dynamic": false,
+      "metadata": {
+        "template": "Start",
+        "id": "start"
+      },
+      "sections": [
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Next",
+              "path",
+              "First node in the chain"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow"
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Import torch",
+      "color": "#e86f0c",
+      "x": -600.0,
+      "y": -260.0,
+      "description": "Imports Torch, an AI library.\nPlacing it unlocks every other node in the library.",
+      "dynamic": false,
+      "metadata": {
+        "template": "Import torch",
+        "id": "torch"
+      },
+      "sections": [
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Torch",
+              "string",
+              "The imported torch module"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow"
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "GPU List",
+      "color": "#085c06",
+      "x": -600.0,
+      "y": 0.0,
+      "description": "0 GPU(s) detected.",
+      "dynamic": true,
+      "metadata": {
+        "template": "GPU List",
+        "id": "gpus"
+      },
+      "sections": [
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "GPU0",
+              "string",
+              "No GPU detected \u2014 placeholder"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow"
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "CPU",
+      "color": "#423ec7",
+      "x": -600.0,
+      "y": 220.0,
+      "description": "This is a CPU Device Node.",
+      "dynamic": false,
+      "metadata": {
+        "template": "CPU",
+        "id": "cpu"
+      },
+      "sections": [
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Device",
+              "string",
+              "The CPU handle"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow"
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Set Device",
+      "color": "#2721cf",
+      "x": -150.0,
+      "y": 0.0,
+      "description": "Routes a device (CPU or GPU) into the pipeline.",
+      "dynamic": false,
+      "metadata": {
+        "template": "Set Device",
+        "id": "sd"
+      },
+      "sections": [
+        {
+          "name": "Input",
+          "description": "What device to use",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Device",
+              "string",
+              "A CPU or GPU handle"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Output",
+          "description": "Where the device is now bound",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Path",
+              "string",
+              "Resolved path (e.g. 'cuda:0')"
+            ],
+            [
+              "Connection",
+              "string",
+              "Backend connection name"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow"
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Merger",
+      "color": "#a31a6a",
+      "x": 350.0,
+      "y": 0.0,
+      "description": "Merges many string inputs into one output.\nUseful for combining GPU nodes and more.",
+      "dynamic": true,
+      "metadata": {
+        "template": "Merger",
+        "id": "mg"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Input1",
+              "string",
+              "cpu / cuda"
+            ],
+            [
+              "Input2",
+              "string",
+              ""
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Merged Output",
+              "string",
+              "Combined result"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow"
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "End",
+      "color": "#5c2e2e",
+      "x": 700.0,
+      "y": -150.0,
+      "description": "Exit point of the pipeline.",
+      "dynamic": false,
+      "metadata": {
+        "template": "End",
+        "id": "end"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Prev",
+              "path",
+              "Last node in the chain"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow"
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from_node": 3,
+      "from_socket": "Device",
+      "to_node": 4,
+      "to_socket": "Device"
+    },
+    {
+      "from_node": 2,
+      "from_socket": "GPU0",
+      "to_node": 5,
+      "to_socket": "Input1"
+    },
+    {
+      "from_node": 0,
+      "from_socket": "Next",
+      "to_node": 1,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 1,
+      "from_socket": "Path Out",
+      "to_node": 2,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 2,
+      "from_socket": "Path Out",
+      "to_node": 3,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 3,
+      "from_socket": "Path Out",
+      "to_node": 4,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 4,
+      "from_socket": "Path Out",
+      "to_node": 5,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 5,
+      "from_socket": "Path Out",
+      "to_node": 6,
+      "to_socket": "Prev"
+    }
+  ]
+}

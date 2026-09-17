@@ -1,0 +1,852 @@
+{
+  "nodes": [
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 250.0,
+      "y": 150.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p6"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 250.0,
+      "y": -100.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p5"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 250.0,
+      "y": 380.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p4"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 250.0,
+      "y": 200.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p3"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 250.0,
+      "y": 20.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p2"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "print",
+      "color": "#5a5a5a",
+      "x": 250.0,
+      "y": -200.0,
+      "description": "Print a value to stdout.  Captured by the run panel.",
+      "dynamic": false,
+      "metadata": {
+        "template": "print",
+        "qualname": "print",
+        "import_module": null,
+        "kind": null,
+        "call": null,
+        "category": "Built-ins/IO",
+        "id": "p1"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "any",
+              "Value to print",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Dict Literal",
+      "color": "#c08a3a",
+      "x": -150.0,
+      "y": 100.0,
+      "description": "**Dict.**  Pairs of (key, value) slots.",
+      "dynamic": true,
+      "metadata": {
+        "template": "Dict Literal",
+        "qualname": null,
+        "import_module": null,
+        "kind": "literal_dict",
+        "call": null,
+        "category": "Built-ins/Values",
+        "id": "d"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "K1",
+              "string",
+              "Key 1",
+              "'a'"
+            ],
+            [
+              "V1",
+              "any",
+              "Value 1",
+              "1"
+            ],
+            [
+              "K2",
+              "string",
+              "Key 2",
+              "'b'"
+            ],
+            [
+              "V2",
+              "any",
+              "Value 2",
+              "2"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "any",
+              "The dict"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "List Literal",
+      "color": "#c08a3a",
+      "x": -150.0,
+      "y": -200.0,
+      "description": "**List.**  Add slots with the + button.",
+      "dynamic": true,
+      "metadata": {
+        "template": "List Literal",
+        "qualname": null,
+        "import_module": null,
+        "kind": "literal_list",
+        "call": null,
+        "category": "Built-ins/Values",
+        "id": "l"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Item1",
+              "any",
+              "Item 1",
+              "1"
+            ],
+            [
+              "Item2",
+              "any",
+              "Item 2",
+              "2"
+            ],
+            [
+              "Item3",
+              "any",
+              "Item 3",
+              "3"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "any",
+              "The list"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Bool Literal",
+      "color": "#c08a3a",
+      "x": -500.0,
+      "y": 380.0,
+      "description": "**Bool.**  True or False.",
+      "dynamic": true,
+      "metadata": {
+        "template": "Bool Literal",
+        "qualname": null,
+        "import_module": null,
+        "kind": "call",
+        "call": "{Value}",
+        "category": "Built-ins/Values",
+        "id": "b"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "bool",
+              "Bool",
+              "True"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "bool",
+              "Bool"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Float Literal",
+      "color": "#c08a3a",
+      "x": -500.0,
+      "y": 200.0,
+      "description": "**Float.**",
+      "dynamic": true,
+      "metadata": {
+        "template": "Float Literal",
+        "qualname": null,
+        "import_module": null,
+        "kind": "call",
+        "call": "{Value}",
+        "category": "Built-ins/Values",
+        "id": "f"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "float",
+              "Float",
+              "3.14"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "float",
+              "Float"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Int Literal",
+      "color": "#c08a3a",
+      "x": -500.0,
+      "y": 20.0,
+      "description": "**Integer.**",
+      "dynamic": true,
+      "metadata": {
+        "template": "Int Literal",
+        "qualname": null,
+        "import_module": null,
+        "kind": "call",
+        "call": "{Value}",
+        "category": "Built-ins/Values",
+        "id": "i"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "int",
+              "Integer",
+              "42"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "int",
+              "Int"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "String Literal",
+      "color": "#c08a3a",
+      "x": -500.0,
+      "y": -200.0,
+      "description": "**String.**  Type text in the Value field.",
+      "dynamic": true,
+      "metadata": {
+        "template": "String Literal",
+        "qualname": null,
+        "import_module": null,
+        "kind": "call",
+        "call": "{Value}",
+        "category": "Built-ins/Values",
+        "id": "s"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Value",
+              "string",
+              "Text",
+              "'hello world'"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Result",
+              "string",
+              "The string"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from_node": 1,
+      "from_socket": "Path Out",
+      "to_node": 0,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 2,
+      "from_socket": "Path Out",
+      "to_node": 1,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 3,
+      "from_socket": "Path Out",
+      "to_node": 2,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 4,
+      "from_socket": "Path Out",
+      "to_node": 3,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 5,
+      "from_socket": "Path Out",
+      "to_node": 4,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 6,
+      "from_socket": "Path Out",
+      "to_node": 5,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 7,
+      "from_socket": "Path Out",
+      "to_node": 6,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 8,
+      "from_socket": "Path Out",
+      "to_node": 7,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 9,
+      "from_socket": "Path Out",
+      "to_node": 8,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 10,
+      "from_socket": "Path Out",
+      "to_node": 9,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 11,
+      "from_socket": "Path Out",
+      "to_node": 10,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 6,
+      "from_socket": "Result",
+      "to_node": 0,
+      "to_socket": "Value"
+    },
+    {
+      "from_node": 7,
+      "from_socket": "Result",
+      "to_node": 1,
+      "to_socket": "Value"
+    },
+    {
+      "from_node": 8,
+      "from_socket": "Result",
+      "to_node": 2,
+      "to_socket": "Value"
+    },
+    {
+      "from_node": 9,
+      "from_socket": "Result",
+      "to_node": 3,
+      "to_socket": "Value"
+    },
+    {
+      "from_node": 10,
+      "from_socket": "Result",
+      "to_node": 4,
+      "to_socket": "Value"
+    },
+    {
+      "from_node": 11,
+      "from_socket": "Result",
+      "to_node": 5,
+      "to_socket": "Value"
+    }
+  ]
+}
