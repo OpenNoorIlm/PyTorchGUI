@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
 """
-fix_run_handlers.py — install the missing ask/media dispatch in
-_on_run_line and the _handle_ask / _handle_media methods.
+edit_filter_ui.py — add a search bar and Expand/Collapse All to the
+library filter dialog.
 
-Every previous attempt to patch _on_run_line looked for an existing
-`if cmd == "ask":` branch.  On this copy of Nodes.py that branch was
-never installed — the original file went straight from
-`payload = parts[2] ...` to the node lookup, so neither the ask nor
-the media protocol had any handler.
+The dialog now has:
 
-This script anchors on the one line that is present in every version
-of _on_run_line:
+    ┌─ Filter node library ────────────────────┐
+    │ Show these categories                    │
+    │ Uncheck a category to hide every node    │
+    │ inside it.                               │
+    │ ┌──────────────────────────────────────┐ │
+    │ │ 🔍  Search…                          │ │
+    │ └──────────────────────────────────────┘ │
+    │ [Expand All] [Collapse All]              │
+    │ ┌──────────────────────────────────────┐ │
+    │ │ ☑ Torch                              │ │
+    │ │     ☑ nn                             │ │
+    │ │         ☑ modules                    │ │
+    │ │ ...                                  │ │
+    │ └──────────────────────────────────────┘ │
+    │ [Select All] [Select None]  Cancel Apply │
+    └──────────────────────────────────────────┘
 
-    payload = parts[2] if len(parts) > 2 else ""
+Search behaviour:
+  * Every token must match somewhere in the full path of an item or
+    in one of its descendants; matching items stay visible and their
+    ancestors are force-visible so the user can see context.
+  * Cleared search restores whatever was hidden by the filter.
 
-It inserts the two protocol branches immediately after, and then
-verifies that MainWindow has _handle_ask and _handle_media methods,
-inserting them if not.
+The tree is replaced wholesale; the new class is idempotent and
+py_compile-checked.
 
-Idempotent.  Backs up Nodes.py to Nodes.py.bak_runhandlers.
+Backs up Nodes.py to Nodes.py.bak_filterui.
 """
 
 import os
@@ -35,240 +48,258 @@ def _find_nodes():
     return None
 
 
-# ===================================================================== #
-#  Dispatch insertion                                                  #
-# ===================================================================== #
+NEW_DIALOG = '''\
+class _LibraryFilterDialog(QDialog):
+    """Checkbox tree of categories with a search bar and bulk expand."""
 
-DISPATCH_BLOCK = '''\
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Filter node library")
+        self.setStyleSheet("QDialog { background:#252525; color:#DDD; }")
+        self.resize(440, 640)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
 
-        # Commands that must run before any node lookup.
-        if cmd == "ask":
-            self._handle_ask(nid, payload)
+        head = QLabel("Show these categories")
+        head.setStyleSheet(
+            "font-weight:700; color:#F0F0F0; font-size:13px;")
+        v.addWidget(head)
+
+        sub = QLabel("Uncheck a category to hide every node inside it.")
+        sub.setStyleSheet("color:#8A8A8A; font-size:11px;")
+        v.addWidget(sub)
+
+        # --- search row --- #
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search categories\\u2026")
+        self.search.setClearButtonEnabled(True)
+        self.search.setStyleSheet(
+            "QLineEdit{background:#1E1E1E;color:#DDD;"
+            "border:1px solid #333;border-radius:3px;"
+            "padding:5px 8px;}"
+            "QLineEdit:focus{border:1px solid #E08C4A;}")
+        self.search.textChanged.connect(self._on_search)
+        v.addWidget(self.search)
+
+        # --- expand / collapse --- #
+        bulk_row = QHBoxLayout()
+        bulk_row.setSpacing(6)
+        btn_expand   = QPushButton("Expand All")
+        btn_collapse = QPushButton("Collapse All")
+        for b in (btn_expand, btn_collapse):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(
+                "QPushButton{background:#333;color:#DDD;"
+                "border:1px solid #4A4A4A;border-radius:3px;"
+                "padding:4px 10px;}"
+                "QPushButton:hover{background:#3F3F3F;"
+                "border:1px solid #E08C4A;}")
+        bulk_row.addWidget(btn_expand)
+        bulk_row.addWidget(btn_collapse)
+        bulk_row.addStretch(1)
+        v.addLayout(bulk_row)
+
+        # --- tree --- #
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(16)
+        self.tree.setStyleSheet(
+            "QTreeWidget{background:#1E1E1E; color:#DDD;"
+            " border:1px solid #333; outline:0; padding:4px;}"
+            "QTreeWidget::item{padding:3px 2px;}"
+            "QTreeWidget::item:hover{background:#2E2E2E;}"
+            "QTreeWidget::indicator{width:14px;height:14px;}")
+        self.tree.itemChanged.connect(self._on_item_changed)
+        v.addWidget(self.tree, 1)
+
+        # --- bottom row --- #
+        row = QHBoxLayout()
+        btn_all  = QPushButton("Select All")
+        btn_none = QPushButton("Select None")
+        row.addWidget(btn_all)
+        row.addWidget(btn_none)
+        row.addStretch(1)
+        btn_cancel = QPushButton("Cancel")
+        btn_apply  = QPushButton("Apply")
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_apply)
+        v.addLayout(row)
+
+        btn_expand.clicked.connect(self.tree.expandAll)
+        btn_collapse.clicked.connect(self.tree.collapseAll)
+        btn_all.clicked.connect(lambda: self._set_all(True))
+        btn_none.clicked.connect(lambda: self._set_all(False))
+        btn_cancel.clicked.connect(self.reject)
+        btn_apply.clicked.connect(self._apply)
+
+        self._items = {}
+        self._build_tree()
+
+    # ---------------------------------------------------------------- #
+    #  Tree construction                                               #
+    # ---------------------------------------------------------------- #
+
+    def _build_tree(self):
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        self._items = {}
+        for path in _iter_category_paths():
+            parts = path.split("/")
+            parent = self.tree.invisibleRootItem()
+            walked = ""
+            for p in parts:
+                walked = (walked + "/" + p) if walked else p
+                if walked in self._items:
+                    parent = self._items[walked]
+                    continue
+                it = QTreeWidgetItem([p])
+                it.setFlags(Qt.ItemIsUserCheckable
+                            | Qt.ItemIsEnabled
+                            | Qt.ItemIsSelectable)
+                checked = walked not in _LIBRARY_FILTER["disabled"]
+                it.setCheckState(
+                    0, Qt.Checked if checked else Qt.Unchecked)
+                it.setData(0, Qt.UserRole, walked)
+                parent.addChild(it)
+                self._items[walked] = it
+                parent = it
+        for it in list(self._items.values()):
+            if it.childCount():
+                self._refresh_tristate(it)
+        self.tree.expandAll()
+        self.tree.blockSignals(False)
+
+    def _refresh_tristate(self, item):
+        children = [item.child(i) for i in range(item.childCount())]
+        if not children:
             return
-        if cmd == "media":
-            self._handle_media(nid, payload)
+        states = [c.checkState(0) for c in children]
+        if all(s == Qt.Checked for s in states):
+            item.setCheckState(0, Qt.Checked)
+        elif all(s == Qt.Unchecked for s in states):
+            item.setCheckState(0, Qt.Unchecked)
+        else:
+            item.setCheckState(0, Qt.PartiallyChecked)
+
+    # ---------------------------------------------------------------- #
+    #  Checkbox handling                                               #
+    # ---------------------------------------------------------------- #
+
+    def _on_item_changed(self, item, col):
+        if col != 0:
             return
-'''
+        self.tree.blockSignals(True)
+        state = item.checkState(0)
+        if state != Qt.PartiallyChecked:
+            self._set_subtree(item, state)
+        parent = item.parent()
+        while parent is not None:
+            self._refresh_tristate(parent)
+            parent = parent.parent()
+        self.tree.blockSignals(False)
 
+    def _set_subtree(self, item, state):
+        item.setCheckState(0, state)
+        for i in range(item.childCount()):
+            self._set_subtree(item.child(i), state)
 
-def _insert_dispatch(src):
-    """
-    Insert the ask / media branches right after the payload extraction
-    inside _on_run_line.  Returns (src, n_changes).
-    """
-    if 'if cmd == "ask":' in src and 'if cmd == "media":' in src:
-        return src, 0
+    def _set_all(self, on):
+        self.tree.blockSignals(True)
+        for it in list(self._items.values()):
+            it.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+        self.tree.blockSignals(False)
 
-    lines = src.split("\n")
+    # ---------------------------------------------------------------- #
+    #  Search                                                          #
+    # ---------------------------------------------------------------- #
 
-    # Find _on_run_line
-    s = None
-    for i, ln in enumerate(lines):
-        if re.match(r'^\s*def _on_run_line\s*\(', ln):
-            s = i
-            break
-    if s is None:
-        print("  [!!] _on_run_line not found")
-        return src, 0
+    def _on_search(self, text):
+        tokens = [t for t in text.strip().lower().split() if t]
+        for path, it in self._items.items():
+            it.setHidden(False)
+        if not tokens:
+            self.tree.expandAll()
+            return
 
-    # Anchor on the payload line inside it
-    anchor = None
-    for j in range(s, min(s + 40, len(lines))):
-        if 'payload = parts[2]' in lines[j]:
-            anchor = j
-            break
-    if anchor is None:
-        print("  [!!] payload line not found inside _on_run_line")
-        return src, 0
+        # mark each node: True if its own path or any descendant matches
+        def matches(path):
+            low = path.lower()
+            return all(t in low for t in tokens)
 
-    indent = re.match(r'^(\s*)', lines[anchor]).group(1)
-    insert = [
-        "",
-        indent + "# Commands that must run before any node lookup.",
-        indent + 'if cmd == "ask":',
-        indent + "    self._handle_ask(nid, payload)",
-        indent + "    return",
-        indent + 'if cmd == "media":',
-        indent + "    self._handle_media(nid, payload)",
-        indent + "    return",
-    ]
-    new_lines = lines[:anchor + 1] + insert + lines[anchor + 1:]
-    return "\n".join(new_lines), 1
+        def mark(item):
+            """Return True if item or any descendant matches."""
+            path = item.data(0, Qt.UserRole) or ""
+            hit = matches(path)
+            any_child = False
+            for i in range(item.childCount()):
+                c = item.child(i)
+                if mark(c):
+                    any_child = True
+            if not hit and not any_child:
+                item.setHidden(True)
+                return False
+            item.setHidden(False)
+            if any_child:
+                item.setExpanded(True)
+            return True
 
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            mark(root.child(i))
 
-# ===================================================================== #
-#  Handler method bodies                                               #
-# ===================================================================== #
+    # ---------------------------------------------------------------- #
+    #  Apply                                                           #
+    # ---------------------------------------------------------------- #
 
-HANDLE_ASK = '''\
-    def _handle_ask(self, nid, payload):
+    def _apply(self):
+        disabled = set()
+        for path, it in self._items.items():
+            if it.checkState(0) == Qt.Unchecked:
+                disabled.add(path)
+        _LIBRARY_FILTER["disabled"] = disabled
         try:
-            prompt = json.loads(payload)
-        except Exception:
-            prompt = str(payload)
-        from PyQt5.QtWidgets import QInputDialog
-        self._show_run_dialog()
-        text, ok = QInputDialog.getText(
-            self, "Input required",
-            str(prompt) if prompt else "Enter value:")
-        reply = text if ok else ""
-        proc = getattr(getattr(self, "_run_thread", None), "_proc", None)
-        if proc is not None and proc.stdin is not None:
-            try:
-                proc.stdin.write(reply + "\\n")
-                proc.stdin.flush()
-            except Exception as ex:
-                print("[ask] write failed:", ex)
+            _lib_filter_save()
+        except Exception as _e:
+            print("[filter] save skipped:", _e)
+        win = self.window()
         try:
-            self._run_log.append("> %s%s" % (prompt, reply))
+            win.library.refresh()
         except Exception:
             pass
-
-'''
-
-HANDLE_MEDIA = '''\
-    def _handle_media(self, nid, payload):
         try:
-            info = json.loads(payload)
-            kind = info.get("kind", "")
-            path = info.get("path", "")
+            win._persist_settings()
         except Exception:
-            return
-        if not path or not os.path.isfile(path):
-            return
-        if kind == "image":
-            self._show_image_dialog(nid, path)
-        elif kind in ("audio", "video"):
-            self._show_media_player(nid, path, kind)
-
-    def _show_image_dialog(self, nid, path):
-        from PyQt5.QtGui import QPixmap
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Image \\u2014 %s" % nid)
-        dlg.setStyleSheet("QDialog{background:#202020;}")
-        v = QVBoxLayout(dlg)
-        v.setContentsMargins(8, 8, 8, 8)
-        pix = QPixmap(path)
-        lbl = QLabel()
-        if pix.width() > 900 or pix.height() > 640:
-            pix = pix.scaled(900, 640, Qt.KeepAspectRatio,
-                             Qt.SmoothTransformation)
-        lbl.setPixmap(pix)
-        lbl.setAlignment(Qt.AlignCenter)
-        v.addWidget(lbl, 1)
-        info = QLabel(os.path.basename(path))
-        info.setStyleSheet("color:#8A8A8A;font-size:11px;")
-        v.addWidget(info)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        btn = QPushButton("Close")
-        btn.clicked.connect(dlg.accept)
-        row.addWidget(btn)
-        v.addLayout(row)
-        dlg.resize(min(pix.width() + 32, 960),
-                   min(pix.height() + 96, 760))
-        if not hasattr(self, "_media_dialogs"):
-            self._media_dialogs = []
-        self._media_dialogs.append(dlg)
-        dlg.show()
-        dlg.raise_()
-
-    def _show_media_player(self, nid, path, kind):
-        try:
-            from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-            from PyQt5.QtMultimediaWidgets import QVideoWidget
-            from PyQt5.QtCore import QUrl
-        except Exception as ex:
-            self.report("QtMultimedia unavailable: %s" % ex,
-                        "warning", 4000)
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("%s \\u2014 %s"
-                          % (kind.capitalize(), nid))
-        dlg.setStyleSheet("QDialog{background:#202020;}")
-        v = QVBoxLayout(dlg)
-        v.setContentsMargins(8, 8, 8, 8)
-        if kind == "video":
-            widget = QVideoWidget()
-            v.addWidget(widget, 1)
-            player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
-            player.setVideoOutput(widget)
-        else:
-            lbl = QLabel(os.path.basename(path))
-            lbl.setAlignment(Qt.AlignCenter)
-            lbl.setStyleSheet("color:#DDD;font-size:14px;")
-            v.addWidget(lbl, 1)
-            player = QMediaPlayer()
-        player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
-        row = QHBoxLayout()
-        btn_play  = QPushButton("Play")
-        btn_pause = QPushButton("Pause")
-        btn_stop  = QPushButton("Stop")
-        row.addWidget(btn_play)
-        row.addWidget(btn_pause)
-        row.addWidget(btn_stop)
-        row.addStretch(1)
-        v.addLayout(row)
-        btn_play.clicked.connect(player.play)
-        btn_pause.clicked.connect(player.pause)
-        btn_stop.clicked.connect(player.stop)
-        player.play()
-        if not hasattr(self, "_media_dialogs"):
-            self._media_dialogs = []
-        self._media_dialogs.append((dlg, player))
-        dlg.resize(800, 600 if kind == "video" else 200)
-        dlg.show()
-        dlg.raise_()
-
+            pass
+        self.accept()
 '''
 
 
-def _method_exists(src, name):
-    return re.search(r'^\s*def ' + re.escape(name) + r'\s*\(', src,
-                     re.MULTILINE) is not None
+_DIALOG_DEF_RE = re.compile(r'^class\s+_LibraryFilterDialog\s*\(')
 
 
-def _insert_methods(src):
-    """
-    Insert _handle_ask and _handle_media (and their helpers) if
-    missing.  Insert them right before _on_run_finished if that method
-    exists, otherwise right before _on_run_line.
-    """
-    added = 0
-    if not _method_exists(src, "_handle_ask"):
-        src = _insert_before(src, "_on_run_finished", HANDLE_ASK)
-        if src is None:
-            src = _insert_before(src, "_on_run_line", HANDLE_ASK)
-        added += 1
-    if not _method_exists(src, "_handle_media"):
-        src = _insert_before(src, "_on_run_finished", HANDLE_MEDIA)
-        if src is None:
-            src = _insert_before(src, "_on_run_line", HANDLE_MEDIA)
-        added += 1
-    return src, added
-
-
-def _insert_before(src, method_name, text):
-    """
-    Insert `text` right before `def <method_name>(` at any indentation.
-    Returns the new source or None if the anchor isn't found.
-    """
-    lines = src.split("\n")
-    s = None
+def _find_class_range(lines):
+    start = None
     for i, ln in enumerate(lines):
-        if re.match(r'^\s*def ' + re.escape(method_name) + r'\s*\(', ln):
-            s = i
+        if _DIALOG_DEF_RE.match(ln):
+            start = i
             break
-    if s is None:
-        return None
-    add = text.rstrip("\n").split("\n")
-    new_lines = lines[:s] + add + [""] + lines[s:]
-    return "\n".join(new_lines)
+    if start is None:
+        return None, None
 
+    # Walk to the next top-level def/class
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        ln = lines[j]
+        if not ln.strip():
+            continue
+        if not ln.startswith(" ") and not ln.startswith("\t"):
+            end = j
+            break
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    return start, end
 
-# ===================================================================== #
-#  Main                                                                #
-# ===================================================================== #
 
 def main():
     path = _find_nodes()
@@ -280,57 +311,49 @@ def main():
     with open(path, "r", encoding="utf-8") as f:
         src = f.read()
 
-    applied = 0
-
-    # 1. Dispatch branches
-    if 'if cmd == "ask":' in src and 'if cmd == "media":' in src:
-        print("  [ok] dispatch branches already present")
-    else:
-        src, n = _insert_dispatch(src)
-        if n:
-            applied += n
-            print("  [+] ask + media dispatch inserted into _on_run_line")
-
-    # 2. Handler methods
-    src, n = _insert_methods(src)
-    if n:
-        applied += n
-        print("  [+] %d handler method(s) inserted" % n)
-    else:
-        print("  [ok] handler methods already present")
-
-    if applied == 0:
-        print()
-        print("Nothing to do — everything is already in place.")
+    if "self.search.setPlaceholderText(\"Search categories" in src:
+        print("  [ok] filter dialog already has the search bar")
         return
 
-    backup = path + ".bak_runhandlers"
+    lines = src.split("\n")
+    s, e = _find_class_range(lines)
+    if s is None:
+        print("  [!!] class _LibraryFilterDialog not found.")
+        print("       Run edit_filter_ui.py's predecessor (the one that")
+        print("       creates the filter dialog) first, or paste the")
+        print("       current class body and I'll retarget.")
+        sys.exit(1)
+
+    print("  found class at line %d (%d lines)" % (s + 1, e - s))
+
+    new_body = NEW_DIALOG.rstrip("\n").split("\n")
+    new_lines = lines[:s] + new_body + lines[e:]
+    new_src = "\n".join(new_lines)
+
+    backup = path + ".bak_filterui"
     shutil.copy(path, backup)
-    print()
-    print("Backup ->", backup)
+    print("  backup ->", backup)
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write(src)
+        f.write(new_src)
 
     try:
         py_compile.compile(path, doraise=True)
-        print("Syntax OK.  %d change(s) applied." % applied)
-    except py_compile.PyCompileError as e:
+        print("  syntax OK")
+    except py_compile.PyCompileError as ex:
         shutil.copy(backup, path)
-        print("! syntax error — restored from backup")
-        print(e)
+        print("  ! syntax error — restored from backup")
+        print(ex)
         sys.exit(1)
 
     print()
-    print("Verify with:")
-    print("    grep -n '_handle_ask\\|_handle_media\\|cmd == \"ask\"' "
-          "helpers/Nodes/Nodes.py")
+    print("Done.  The filter dialog now has:")
+    print("  - a search bar at the top")
+    print("  - Expand All / Collapse All buttons")
+    print("  - the same checkbox tree as before")
     print()
-    print("Then run:")
-    print("    python main.py")
-    print()
-    print("Now `input` nodes pop a QInputDialog and media nodes pop a")
-    print("viewer during the run.")
+    print("Search matches any token against the full category path;")
+    print("ancestors stay visible so you keep context.")
 
 
 if __name__ == "__main__":

@@ -3526,25 +3526,57 @@ class ColorSwatch(QPushButton):
 
 
 class _LibraryFilterDialog(QDialog):
-    """Checkbox tree of categories.  No individual nodes."""
+    """Checkbox tree of categories with a search bar and bulk expand."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Filter node library")
         self.setStyleSheet("QDialog { background:#252525; color:#DDD; }")
-        self.resize(420, 560)
+        self.resize(440, 640)
         v = QVBoxLayout(self)
         v.setContentsMargins(12, 12, 12, 12)
         v.setSpacing(8)
 
         head = QLabel("Show these categories")
-        head.setStyleSheet("font-weight:700; color:#F0F0F0; font-size:13px;")
+        head.setStyleSheet(
+            "font-weight:700; color:#F0F0F0; font-size:13px;")
         v.addWidget(head)
 
         sub = QLabel("Uncheck a category to hide every node inside it.")
         sub.setStyleSheet("color:#8A8A8A; font-size:11px;")
         v.addWidget(sub)
 
+        # --- search row --- #
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search categories\u2026")
+        self.search.setClearButtonEnabled(True)
+        self.search.setStyleSheet(
+            "QLineEdit{background:#1E1E1E;color:#DDD;"
+            "border:1px solid #333;border-radius:3px;"
+            "padding:5px 8px;}"
+            "QLineEdit:focus{border:1px solid #E08C4A;}")
+        self.search.textChanged.connect(self._on_search)
+        v.addWidget(self.search)
+
+        # --- expand / collapse --- #
+        bulk_row = QHBoxLayout()
+        bulk_row.setSpacing(6)
+        btn_expand   = QPushButton("Expand All")
+        btn_collapse = QPushButton("Collapse All")
+        for b in (btn_expand, btn_collapse):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(
+                "QPushButton{background:#333;color:#DDD;"
+                "border:1px solid #4A4A4A;border-radius:3px;"
+                "padding:4px 10px;}"
+                "QPushButton:hover{background:#3F3F3F;"
+                "border:1px solid #E08C4A;}")
+        bulk_row.addWidget(btn_expand)
+        bulk_row.addWidget(btn_collapse)
+        bulk_row.addStretch(1)
+        v.addLayout(bulk_row)
+
+        # --- tree --- #
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(16)
@@ -3556,8 +3588,8 @@ class _LibraryFilterDialog(QDialog):
             "QTreeWidget::indicator{width:14px;height:14px;}")
         self.tree.itemChanged.connect(self._on_item_changed)
         v.addWidget(self.tree, 1)
-        self._build_tree()
 
+        # --- bottom row --- #
         row = QHBoxLayout()
         btn_all  = QPushButton("Select All")
         btn_none = QPushButton("Select None")
@@ -3570,10 +3602,19 @@ class _LibraryFilterDialog(QDialog):
         row.addWidget(btn_apply)
         v.addLayout(row)
 
+        btn_expand.clicked.connect(self.tree.expandAll)
+        btn_collapse.clicked.connect(self.tree.collapseAll)
         btn_all.clicked.connect(lambda: self._set_all(True))
         btn_none.clicked.connect(lambda: self._set_all(False))
         btn_cancel.clicked.connect(self.reject)
         btn_apply.clicked.connect(self._apply)
+
+        self._items = {}
+        self._build_tree()
+
+    # ---------------------------------------------------------------- #
+    #  Tree construction                                               #
+    # ---------------------------------------------------------------- #
 
     def _build_tree(self):
         self.tree.blockSignals(True)
@@ -3593,11 +3634,12 @@ class _LibraryFilterDialog(QDialog):
                             | Qt.ItemIsEnabled
                             | Qt.ItemIsSelectable)
                 checked = walked not in _LIBRARY_FILTER["disabled"]
-                it.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+                it.setCheckState(
+                    0, Qt.Checked if checked else Qt.Unchecked)
+                it.setData(0, Qt.UserRole, walked)
                 parent.addChild(it)
                 self._items[walked] = it
                 parent = it
-        # propagate tri-state bottom-up
         for it in list(self._items.values()):
             if it.childCount():
                 self._refresh_tristate(it)
@@ -3615,6 +3657,10 @@ class _LibraryFilterDialog(QDialog):
             item.setCheckState(0, Qt.Unchecked)
         else:
             item.setCheckState(0, Qt.PartiallyChecked)
+
+    # ---------------------------------------------------------------- #
+    #  Checkbox handling                                               #
+    # ---------------------------------------------------------------- #
 
     def _on_item_changed(self, item, col):
         if col != 0:
@@ -3639,6 +3685,48 @@ class _LibraryFilterDialog(QDialog):
         for it in list(self._items.values()):
             it.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
         self.tree.blockSignals(False)
+
+    # ---------------------------------------------------------------- #
+    #  Search                                                          #
+    # ---------------------------------------------------------------- #
+
+    def _on_search(self, text):
+        tokens = [t for t in text.strip().lower().split() if t]
+        for path, it in self._items.items():
+            it.setHidden(False)
+        if not tokens:
+            self.tree.expandAll()
+            return
+
+        # mark each node: True if its own path or any descendant matches
+        def matches(path):
+            low = path.lower()
+            return all(t in low for t in tokens)
+
+        def mark(item):
+            """Return True if item or any descendant matches."""
+            path = item.data(0, Qt.UserRole) or ""
+            hit = matches(path)
+            any_child = False
+            for i in range(item.childCount()):
+                c = item.child(i)
+                if mark(c):
+                    any_child = True
+            if not hit and not any_child:
+                item.setHidden(True)
+                return False
+            item.setHidden(False)
+            if any_child:
+                item.setExpanded(True)
+            return True
+
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            mark(root.child(i))
+
+    # ---------------------------------------------------------------- #
+    #  Apply                                                           #
+    # ---------------------------------------------------------------- #
 
     def _apply(self):
         disabled = set()
