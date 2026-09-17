@@ -332,7 +332,19 @@ def get_params(obj):
 
     out = []
     for p in params:
-        if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+        if p.kind == p.VAR_POSITIONAL:
+            # *args — represent as a list-typed input named "*<name>".
+            out.append(("*" + p.name, "vector",
+                        "Positional arguments as a list", "[]"))
+            if len(out) >= MAX_INPUTS:
+                break
+            continue
+        if p.kind == p.VAR_KEYWORD:
+            # **kwargs — represent as a dict-typed input named "**<name>".
+            out.append(("**" + p.name, "any",
+                        "Keyword arguments as a dict", "{}"))
+            if len(out) >= MAX_INPUTS:
+                break
             continue
         if p.name in ("self", "cls"):
             continue

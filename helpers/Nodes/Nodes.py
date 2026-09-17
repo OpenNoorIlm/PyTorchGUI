@@ -37,7 +37,8 @@ from PyQt5.QtGui import (QColor, QPen, QBrush, QPainter, QPainterPath, QFont,
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QGraphicsView,
                              QGraphicsScene, QGraphicsItem, QGraphicsPathItem,
                              QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                             QLineEdit, QPushButton, QComboBox, QCheckBox,
+                             QLineEdit, QPlainTextEdit, QPushButton,
+                             QComboBox, QCheckBox,
                              QScrollArea, QSplitter, QColorDialog, QStyle,
                              QFrame, QSizePolicy, QToolButton, QMenu,
                              QTreeWidget, QTreeWidgetItem, QFileDialog,
@@ -3841,9 +3842,15 @@ class NodeSidebar(QScrollArea):
         self.vbox.addWidget(name_edit)
 
         self.vbox.addWidget(self._sub_label("Description"))
-        desc_edit = QLineEdit(node.description)
+        desc_edit = QPlainTextEdit(node.description)
         desc_edit.setPlaceholderText("Optional description…")
-        desc_edit.textChanged.connect(node.set_description)
+        desc_edit.setFixedHeight(72)
+        desc_edit.setStyleSheet(
+            "QPlainTextEdit{background:#3C3C3C;border:1px solid #555;"
+            "border-radius:3px;color:#EEEEEE;padding:2px 4px;"
+            "font-size:11px;}")
+        desc_edit.textChanged.connect(
+            lambda pe=desc_edit: node.set_description(pe.toPlainText()))
         self.vbox.addWidget(desc_edit)
 
         self.vbox.addWidget(self._sub_label("Node Color"))
@@ -6514,6 +6521,27 @@ class MainWindow(QMainWindow):
             v = str(s.value).strip()
             if not v:
                 return "''"
+
+            # Human-friendly forms for the *args and **kwargs sockets
+            # produced by create.py for functions like hotkey(*args,
+            # **kwargs) or nn.Sequential(*args).
+            nm = getattr(s, "name", "") or ""
+            if nm.startswith("**"):
+                # `interval=0.2, timeout=5` -> `{'interval': 0.2, 'timeout': 5}`
+                if not v.startswith("{"):
+                    pairs = []
+                    for piece in v.split(","):
+                        piece = piece.strip()
+                        if not piece or "=" not in piece:
+                            continue
+                        k, val = piece.split("=", 1)
+                        pairs.append("%s: %s"
+                                     % (k.strip(), val.strip()))
+                    v = "{" + ", ".join(pairs) + "}"
+            elif nm.startswith("*"):
+                # `ctrl, c` or `1, 2, 3` -> `['ctrl', 'c']`
+                if not v.startswith(("[", "(")):
+                    v = "[" + v + "]"
             if v in ("True", "False", "None"):
                 return v
             if v[0].isdigit() or v[0] in "-+.[({":
@@ -6544,7 +6572,12 @@ class MainWindow(QMainWindow):
                     continue
                 if inp.name in ("Path In", "Path Out", "Next", "Prev"):
                     continue
-                if not _re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", inp.name):
+                # Accept plain identifiers and splat names (`*args`,
+                # `**kwargs`) so the create.py-generated synthetic
+                # inputs are not filtered out.
+                if not _re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", inp.name) \
+                        and not _re.match(
+                            r"^\*{1,2}[A-Za-z_][A-Za-z0-9_]*$", inp.name):
                     continue
                 if inp.connections:
                     src = inp.connections[0].start_socket
@@ -6597,6 +6630,14 @@ class MainWindow(QMainWindow):
                 if r:
                     return r, "import " + r
                 return "", ""
+            # Fallback for libraries passed with `create.py -l NAME`:
+            # the root segment of the category is the top-level module,
+            # and we import it directly.  So a node with category
+            # "pyautogui" gets `import pyautogui` and its call sites
+            # become pyautogui.<name>(...).
+            root = c.split("/")[0].strip()
+            if root and _re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", root):
+                return root, "import " + root
             return "", ""
 
         for n in nodes:
@@ -6691,6 +6732,14 @@ class MainWindow(QMainWindow):
                 return L, miss
 
             if kind in ("call", "value"):
+                # Start / End and anything else under the Flow category
+                # are graph anchors, not real calls.  Emit a plain None
+                # and skip import resolution entirely.
+                _cat = (n.metadata.get("category")
+                        or n.metadata.get("template") or "")
+                if str(_cat).strip() == "Flow" or n.title in ("Start", "End"):
+                    L.append("%s%s = None" % (pad, var))
+                    return L, miss
                 call_t = n.metadata.get("call") or tpl.get("call")
                 qual = n.metadata.get("qualname") or tpl.get("qualname")
                 imp = n.metadata.get("import_module") or tpl.get("import_module")
@@ -6743,26 +6792,37 @@ class MainWindow(QMainWindow):
                     for k, v in B.items():
                         (pos if k == "Tensor" else fas).append(v)
                 else:
-                    # Split the bound inputs into three classes:
-                    #   * "auto" sentinel       -> drop entirely
-                    #   * top-level comma splat -> emit positionally
-                    #   * everything else       -> emit as name=value
+                    # Split the bound inputs into four classes:
+                    #   "auto" sentinel        -> drop entirely
+                    #   "*name" (splat args)   -> emit as *(...)
+                    #   "**name" (splat kwargs)-> emit as **(...)
+                    #   everything else        -> name=value (or positional)
                     items = [(k, v) for (k, v) in B.items()
                              if not _is_auto_sentinel(v)]
+                    star_args = None
+                    star_kwargs = None
+                    regular = []
+                    for (k, v) in items:
+                        if k.startswith("**"):
+                            star_kwargs = v
+                        elif k.startswith("*"):
+                            star_args = v
+                        else:
+                            regular.append((k, v))
                     first_is_splat = (
-                        bool(items) and _looks_positional_splat(items[0][1]))
-                    if first_is_splat:
-                        for k, v in items:
-                            if is_mod and k == "Tensor":
-                                fa = v
-                            else:
-                                pos.append(v)
-                    else:
-                        for k, v in items:
-                            if is_mod and k == "Tensor":
-                                fa = v
-                            else:
-                                kw.append("%s=%s" % (k, v))
+                        bool(regular)
+                        and _looks_positional_splat(regular[0][1]))
+                    for (k, v) in regular:
+                        if is_mod and k == "Tensor":
+                            fa = v
+                        elif first_is_splat:
+                            pos.append(v)
+                        else:
+                            kw.append("%s=%s" % (k, v))
+                    if star_args is not None:
+                        pos.append("*(" + star_args + ")")
+                    if star_kwargs is not None:
+                        kw.append("**(" + star_kwargs + ")")
                 argstr = ", ".join(pos + kw)
                 # If we dropped an "auto" input and the class has a Lazy variant,
                 # swap to the variant that infers the missing parameter at runtime.
