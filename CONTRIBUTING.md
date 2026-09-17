@@ -91,5 +91,10 @@ If the bug is in codegen, paste the offending line from `generated.py`.
 
 ## License
 
-By contributing, you agree your work is licensed under the project's
-MIT license.
+PyTorchUI is released under the **GNU General Public License v3.0**
+(or, at your option, any later version). See [LICENSE](LICENSE) for the
+full text.
+
+By opening a pull request you agree that your contribution is licensed
+under the same terms. If you are contributing on behalf of an employer,
+please ensure you have the authority to do so.

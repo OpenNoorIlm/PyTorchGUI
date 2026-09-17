@@ -60,3 +60,11 @@ directly:
 
 - PyQt5: https://www.riverbankcomputing.com/software/pyqt/
 - PyTorch: https://github.com/pytorch/pytorch/security/policy
+
+## License
+
+PyTorchUI is distributed under the **GNU General Public License v3.0**
+or later. See [LICENSE](LICENSE). The GPL's warranty disclaimer is
+relevant here: this software is provided "as is", without warranty of
+any kind. Security issues are nonetheless taken seriously, as described
+above.
