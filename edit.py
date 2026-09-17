@@ -1,271 +1,209 @@
 #!/usr/bin/env python3
 """
-add_call_class.py — add Call Class, fix dotted-name calls, add kwargs
-                    to Method Call.
+fix_enum_defaults2.py — line-based retry of the enum-default fix.
 
-Three independent changes:
+The previous patch anchored on an exact multi-line string; the current
+create.py has that block condensed onto one line:
 
-1.  New nodes under "Built-ins/Classes":
-      Call Class        → NAME(*args), dotted or bare
-      Class Attribute   → getattr(ClassName, "CONST")
+    if p.default is inspect.Parameter.empty:
+        desc, dv = "", None
+    else:
+        ...
 
-2.  call_by_name codegen now handles dotted names.  Previously the
-    whole Name was wrapped in globals()[str(...)], so:
-        Name="Point"      -> globals()['Point'](...)          ok
-        Name="math.sqrt"  -> globals()['math.sqrt'](...)      KeyError
-    Now dotted names emit directly:
-        Name="math.sqrt"  -> math.sqrt(...)
-    and bare names keep the globals() lookup.
+This version locates get_params by its `def` line, finds the
+`if p.default is inspect.Parameter.empty:` inside it, and replaces the
+block through the closing `out.append(...)` line.
 
-3.  Method Call gains a Kwargs field, and the codegen forwards it:
-        Object="p", Method="dist", Args="[1]", Kwargs="{'key': 2}"
-        -> p.dist(*([1]), **({'key': 2}))
-
-Idempotent.  Backs up Nodes.py to Nodes.py.bak_callclass.
+Idempotent.  Backs up create.py to create.py.bak_enum2.
 """
 
 import os
+import re
 import shutil
 import py_compile
 import sys
 
 
-def _find_nodes():
-    for p in ("helpers/Nodes/Nodes.py", "Nodes.py"):
+def _find_create():
+    for p in ("create.py", "helpers/create.py"):
         if os.path.isfile(p):
             return p
     return None
 
 
-# --------------------------------------------------------------------- #
-#  Anchors — raw triple-quoted so backslashes stay literal              #
-# --------------------------------------------------------------------- #
+NEW_DEFAULT_BLOCK = '''\
+        if p.default is inspect.Parameter.empty:
+            desc, dv = "", None
+        else:
+            # A default is only usable if its repr() is a valid Python
+            # literal.  Enums (AwqBackend.AUTO, etc.), tensors,
+            # dataclasses, and custom objects all produce <...>-shaped
+            # reprs that break the generated file.  We drop those.
+            import enum as _enum
 
-A_CLASS = r'''    ("Built-ins/Classes", "Define Class", "class_",
-     "**class NAME(bases):** body via blocks.",
-     [("Name", "string", "Name", "'MyClass'"),
-      ("Bases", "string", "Bases", "''")], [], None, None),
-'''
+            def _is_literal_default(x):
+                if x is None or isinstance(x, bool):
+                    return True
+                if isinstance(x, _enum.Enum):
+                    return False
+                if type(x) is int or type(x) is float:
+                    return True
+                if type(x) is str and len(x) < 200:
+                    return True
+                return False
 
-A_CLASS_NEW = A_CLASS + r'''    ("Built-ins/Classes", "Call Class", "call_by_name",
-     "**Instantiate a class.**  NAME(*args).\n\n"
-     "- `NAME` may be a bare class name (`Point`) or a dotted\n"
-     "  path (`math.Vector`, `subprocess.Popen`).\n"
-     "- `Args` is a Python list of positional arguments:\n"
-     "  `[3, 4]`, `[cmd, shell=True]`, or `[]` for none.\n"
-     "- The output is the new instance; feed it into\n"
-     "  **Method Call** or **Get Attr**.",
-     [("Name", "string", "Class name or dotted path", "'Point'"),
-      ("Args", "any", "Positional arguments as a list", "[]")],
-     [("Instance", "any", "The newly created object")],
-     None, None),
-    ("Built-ins/Classes", "Class Attribute", "attr_get",
-     "**Read a class-level attribute.**\n\n"
-     "`getattr(ClassName, \"CONST\")` — class constants, class\n"
-     "variables, classmethods, or staticmethods.  Feed the\n"
-     "class (not an instance) into `Object`.",
-     [("Object", "any", "A class object", "None"),
-      ("Attr", "string", "Attribute name", "'CONST'")],
-     [("Result", "any", "Attribute value")],
-     None, None),
-'''
+            try:
+                desc = "Default: %r" % (p.default,)
+            except Exception:
+                desc = "Has default"
 
-
-A_CALL_BY_NAME = r'''            if kind == "call_by_name":
-                L.append("%s%s = globals()[str(%s)](*(%s))"
-                         % (pad, var, B.get("Name") or "'f'", B.get("Args") or "[]"))
-                return L, miss
-'''
-
-A_CALL_BY_NAME_NEW = r'''            if kind == "call_by_name":
-                name_lit = B.get("Name") or "'f'"
-                args_lit = B.get("Args") or "[]"
-                raw = str(name_lit).strip()
-                # Determine if the user typed a name (quoted in the
-                # generated code) or wired an expression.
-                if (len(raw) >= 2
-                        and raw[0] == raw[-1]
-                        and raw[0] in ("'", '"')):
-                    bare = raw[1:-1]
-                    quoted = True
+            if not _is_literal_default(p.default):
+                dv = None
+            else:
+                try:
+                    r = repr(p.default)
+                except Exception:
+                    r = ""
+                if (not r
+                        or r.startswith("<")
+                        or r.endswith(">")
+                        or " object at 0x" in r):
+                    dv = None
+                elif isinstance(p.default, str):
+                    dv = p.default
                 else:
-                    bare = raw
-                    quoted = False
-                if quoted:
-                    # Dotted path like math.sqrt: emit directly.
-                    if ("." in bare
-                            and _re.match(
-                                r"^[A-Za-z_][A-Za-z0-9_]*"
-                                r"(\.[A-Za-z_][A-Za-z0-9_]*)*$",
-                                bare)):
-                        L.append("%s%s = %s(*(%s))"
-                                 % (pad, var, bare, args_lit))
-                    else:
-                        L.append("%s%s = globals()[str(%s)](*(%s))"
-                                 % (pad, var, name_lit, args_lit))
-                else:
-                    # Wired expression: call it directly.
-                    L.append("%s%s = (%s)(*(%s))"
-                             % (pad, var, bare, args_lit))
-                return L, miss
+                    dv = r
 '''
 
 
-A_METHOD_ENTRY = r'''    ("Built-ins/Objects", "Method Call", "method_call",
-     "**obj.method(*args).**",
-     [("Object", "any", "Object", "None"),
-      ("Method", "string", "Method", "'append'"),
-      ("Args", "any", "Args", "[]")],
-     [("Result", "any", "Return")], None, None),
-'''
-
-A_METHOD_ENTRY_NEW = r'''    ("Built-ins/Objects", "Method Call", "method_call",
-     "**obj.method(*args, **kwargs).**\n\n"
-     "- `Object` is any expression evaluating to an instance\n"
-     "  (a **Call Class** output, a **Get Variable**, ...).\n"
-     "- `Method` is the method name, without parentheses.\n"
-     "- `Args` is a Python list of positional arguments.\n"
-     "- `Kwargs` is a Python dict of keyword arguments.  Leave it\n"
-     "  empty (`{}`) if the method takes none.",
-     [("Object", "any", "Object", "None"),
-      ("Method", "string", "Method name", "'append'"),
-      ("Args", "any", "Positional args as a list", "[]"),
-      ("Kwargs", "any", "Keyword args as a dict", "{}")],
-     [("Result", "any", "Return value")], None, None),
-'''
+_DEF_RE = re.compile(r'^def\s+get_params\s*\(')
+_EMPTY_RE = re.compile(r'^(\s*)if\s+p\.default\s+is\s+inspect\.Parameter\.empty\s*:')
+_APPEND_RE = re.compile(r'^(\s*)out\.append\(')
 
 
-A_METHOD_CODEGEN = r'''            if kind == "method_call":
-                obj = B.get("Object") or "None"
-                meth = str(B.get("Method") or "'m'").strip("'\"")
-                L.append("%s%s = %s.%s(*(%s))"
-                         % (pad, var, obj, meth, B.get("Args") or "[]"))
-                return L, miss
-'''
-
-A_METHOD_CODEGEN_NEW = r'''            if kind == "method_call":
-                obj = B.get("Object") or "None"
-                meth = str(B.get("Method") or "'m'").strip("'\"")
-                args_lit = B.get("Args") or "[]"
-                kwargs_lit = B.get("Kwargs")
-                if kwargs_lit and kwargs_lit.strip() not in ("{}", ""):
-                    L.append("%s%s = %s.%s(*(%s), **(%s))"
-                             % (pad, var, obj, meth, args_lit,
-                                kwargs_lit))
-                else:
-                    L.append("%s%s = %s.%s(*(%s))"
-                             % (pad, var, obj, meth, args_lit))
-                return L, miss
-'''
+def _find_get_params(lines):
+    start = None
+    for i, ln in enumerate(lines):
+        if _DEF_RE.match(ln):
+            start = i
+            break
+    if start is None:
+        return None, None
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        ln = lines[j]
+        if not ln.strip():
+            continue
+        if not ln.startswith(" ") and not ln.startswith("\t"):
+            end = j
+            break
+    return start, end
 
 
-A_GETATTR_ENTRY = r'''    ("Built-ins/Objects", "Get Attr", "attr_get",
-     "**getattr(obj, attr).**",
-     [("Object", "any", "Object", "None"),
-      ("Attr", "string", "Attr", "'x'")],
-     [("Result", "any", "Value")], None, None),
-'''
+def _find_block(lines, gs, ge):
+    """
+    Inside get_params[gs:ge], find the [block_start, block_end) that runs
+    from the `if p.default is inspect.Parameter.empty:` line through the
+    line BEFORE the first `out.append(...)` at the same indentation.
+    """
+    bs = None
+    for i in range(gs, ge):
+        if _EMPTY_RE.match(lines[i]):
+            bs = i
+            break
+    if bs is None:
+        return None, None
 
-A_GETATTR_ENTRY_NEW = r'''    ("Built-ins/Objects", "Get Attr", "attr_get",
-     "**getattr(obj, attr).**\n\n"
-     "Reads an attribute from any object:\n\n"
-     "- instance variables: feed the instance into `Object`\n"
-     "- class constants: feed the class into `Object`\n"
-     "- for nested access (obj.a.b), use two Get Attr nodes",
-     [("Object", "any", "Instance or class", "None"),
-      ("Attr", "string", "Attribute name", "'x'")],
-     [("Result", "any", "Value")], None, None),
-'''
-
-
-PATCHES = [
-    ("Call Class + Class Attribute nodes",
-     A_CLASS, A_CLASS_NEW),
-    ("call_by_name handles dotted names",
-     A_CALL_BY_NAME, A_CALL_BY_NAME_NEW),
-    ("Method Call gains a Kwargs field",
-     A_METHOD_ENTRY, A_METHOD_ENTRY_NEW),
-    ("method_call forwards kwargs",
-     A_METHOD_CODEGEN, A_METHOD_CODEGEN_NEW),
-    ("Get Attr description covers classes",
-     A_GETATTR_ENTRY, A_GETATTR_ENTRY_NEW),
-]
+    # Same-indent `out.append(` is the terminator.
+    indent = len(lines[bs]) - len(lines[bs].lstrip())
+    be = None
+    for j in range(bs + 1, ge):
+        m = _APPEND_RE.match(lines[j])
+        if not m:
+            continue
+        ind_j = len(m.group(1))
+        if ind_j == indent:
+            be = j
+            break
+    if be is None:
+        return None, None
+    return bs, be
 
 
 def main():
-    path = _find_nodes()
+    path = _find_create()
     if not path:
-        print("Could not find helpers/Nodes/Nodes.py or Nodes.py")
+        print("Could not find create.py")
         sys.exit(1)
 
     print("Target:", path)
     with open(path, "r", encoding="utf-8") as f:
         src = f.read()
 
-    applied = 0
-    already = 0
-    missed = []
-
-    for label, old, new in PATCHES:
-        if new in src:
-            print("  [ok] %s" % label)
-            already += 1
-            continue
-        if old not in src:
-            print("  [!!] %s (anchor not found)" % label)
-            missed.append(label)
-            continue
-        src = src.replace(old, new, 1)
-        applied += 1
-        print("  [+] %s" % label)
-
-    if applied == 0:
-        print()
-        if already:
-            print("Everything is already patched.")
-        else:
-            print("No patches could be applied.  Nothing was written.")
-            for m in missed:
-                print("   -", m)
+    if "_is_literal_default" in src:
+        print("  [ok] already patched")
         return
 
-    backup = path + ".bak_callclass"
+    lines = src.split("\n")
+    gs, ge = _find_get_params(lines)
+    if gs is None:
+        print("  [!!] def get_params not found")
+        sys.exit(1)
+    print("  found get_params at line %d (%d lines)"
+          % (gs + 1, ge - gs))
+
+    bs, be = _find_block(lines, gs, ge)
+    if bs is None:
+        print("  [!!] could not find the default-handling block inside")
+        print("       get_params.  Here is the current body:")
+        for k in range(gs, ge):
+            print("       %s" % lines[k])
+        sys.exit(1)
+    print("  found default block at lines %d-%d (%d lines)"
+          % (bs + 1, be, be - bs))
+
+    # Show the block we're about to replace so the user can verify.
+    print("  current block:")
+    for k in range(bs, be):
+        print("    %s" % lines[k])
+
+    new_lines = lines[:bs] + NEW_DEFAULT_BLOCK.rstrip("\n").split("\n") + lines[be:]
+    new_src = "\n".join(new_lines)
+
+    backup = path + ".bak_enum2"
     shutil.copy(path, backup)
     print()
-    print("Backup ->", backup)
+    print("  backup -> %s" % backup)
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write(src)
+        f.write(new_src)
 
     try:
         py_compile.compile(path, doraise=True)
-        print("Syntax OK.  %d patch(es) applied." % applied)
-    except py_compile.PyCompileError as e:
+        print("  syntax OK.  get_params default-handling block replaced.")
+    except py_compile.PyCompileError as ex:
         shutil.copy(backup, path)
-        print("! syntax error — restored from backup")
-        print(e)
+        print("  ! syntax error — restored from backup")
+        print(ex)
         sys.exit(1)
 
-    if missed:
-        print()
-        print("Skipped:")
-        for m in missed:
-            print("   -", m)
-
     print()
-    print("New nodes (library sidebar):")
-    print("  Built-ins/Classes → Call Class")
-    print("  Built-ins/Classes → Class Attribute")
+    print("Verify the fix works with the offending default:")
+    print("    python3 - <<'PY'")
+    print("    import enum")
+    print("    class AwqBackend(enum.Enum):")
+    print("        AUTO = 'auto'")
+    print("    print('repr:', repr(AwqBackend.AUTO))")
+    print("    import enum as _e")
+    print("    x = AwqBackend.AUTO")
+    print("    print('is enum:', isinstance(x, _e.Enum))")
+    print("    print('is int :', isinstance(x, int))")
+    print("    PY")
     print()
-    print("Updated nodes:")
-    print("  Built-ins/Objects → Method Call  (added Kwargs field)")
-    print("  Call Function / Call Class       (dotted names work)")
-    print()
-    print("Typical class workflow:")
-    print("  1. Define Class     -> class object")
-    print("  2. Call Class       -> instance")
-    print("  3. Method Call      -> call a method on the instance")
-    print("  4. Get Attr         -> read an attribute")
+    print("Then regenerate:")
+    print("    python create.py -l '[os,io,os.path,math,random,json,"
+          "pathlib,shutil,tempfile,time,datetime,sqlite3,transformers]'")
+    print("    python main.py")
 
 
 if __name__ == "__main__":

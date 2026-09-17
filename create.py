@@ -301,17 +301,44 @@ def get_params(obj):
         if p.default is inspect.Parameter.empty:
             desc, dv = "", None
         else:
+            # A default is only usable if its repr() is a valid Python
+            # literal.  Enums (AwqBackend.AUTO, etc.), tensors,
+            # dataclasses, and custom objects all produce <...>-shaped
+            # reprs that break the generated file.  We drop those.
+            import enum as _enum
+
+            def _is_literal_default(x):
+                if x is None or isinstance(x, bool):
+                    return True
+                if isinstance(x, _enum.Enum):
+                    return False
+                if type(x) is int or type(x) is float:
+                    return True
+                if type(x) is str and len(x) < 200:
+                    return True
+                return False
+
             try:
                 desc = "Default: %r" % (p.default,)
             except Exception:
                 desc = "Has default"
-            if isinstance(p.default, str) and len(p.default) < 60:
-                dv = p.default
-            elif (isinstance(p.default, (int, float, bool))
-                    and p.default is not None):
-                dv = repr(p.default)
-            else:
+
+            if not _is_literal_default(p.default):
                 dv = None
+            else:
+                try:
+                    r = repr(p.default)
+                except Exception:
+                    r = ""
+                if (not r
+                        or r.startswith("<")
+                        or r.endswith(">")
+                        or " object at 0x" in r):
+                    dv = None
+                elif isinstance(p.default, str):
+                    dv = p.default
+                else:
+                    dv = r
         out.append((p.name, t, desc, dv))
         if len(out) >= MAX_INPUTS:
             break

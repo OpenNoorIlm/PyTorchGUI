@@ -316,9 +316,48 @@ ROLES = [
 
     # ----- classes -----
     ("Built-ins/Classes", "Define Class", "class_",
-     "**class NAME(bases):** body via blocks.",
-     [("Name", "string", "Name", "'MyClass'"),
-      ("Bases", "string", "Bases", "''")], [], None, None),
+     "**class NAME(bases):** body via blocks.\n\n"
+     "**Bases** is a comma-separated list of parent classes, or an\n"
+     "empty string for none:\n\n"
+     "- no bases:      `''` (or leave blank)\n"
+     "- one base:      `'QWidget'`\n"
+     "- several:       `'QWidget, QObject'`\n"
+     "- module path:   `'PyQt5.QtWidgets.QWidget'`\n\n"
+     "Example: `Name=\"MyWindow\"`, `Bases=\"'QMainWindow'\"`\n"
+     "emits `class MyWindow(QMainWindow):`.",
+     [("Name", "string", "Class name", "'MyClass'"),
+      ("Bases", "string", "Parent classes (empty for none)", "''")],
+     [], None, None),
+
+    # ---- self helpers ---- #
+    ("Built-ins/Classes", "Self", "call",
+     "**self.**  Reference the current instance inside a method body.\n\n"
+     "Wire the output into **Call Self Method**, **Get Self Attr**,\n"
+     "**Set Self Attr**, or the more general **Method Call** /\n"
+     "**Get Attr** / **Set Attr** nodes.",
+     [],
+     [("Result", "any", "The instance (\"self\")")], None, "self"),
+    ("Built-ins/Classes", "Set Self Attr", "self_set",
+     "**self.NAME = VALUE.**  Assign an instance attribute.\n\n"
+     "Reads naturally inside `__init__` or any method body.  Use\n"
+     "**Set Attr** instead if you need to set an attribute on an\n"
+     "object other than `self`.",
+     [("Name", "string", "Attribute name", "'x'"),
+      ("Value", "any", "Value to assign", "None")],
+     [], None, None),
+    ("Built-ins/Classes", "Get Self Attr", "self_get",
+     "**self.NAME.**  Read an instance attribute.",
+     [("Name", "string", "Attribute name", "'x'")],
+     [("Result", "any", "Attribute value")], None, None),
+    ("Built-ins/Classes", "Call Self Method", "self_method",
+     "**self.METHOD(*args, **kwargs).**  Invoke a method on the\n"
+     "current instance from inside another method.\n\n"
+     "Example: inside `def update(self): ...` this emits\n"
+     "`self.show()`, `self.resize(800, 600)`, etc.",
+     [("Method", "string", "Method name", "'show'"),
+      ("Args", "any", "Positional args as a list", "[]"),
+      ("Kwargs", "any", "Keyword args as a dict", "{}")],
+     [("Result", "any", "Return value")], None, None),
     ("Built-ins/Classes", "Call Class", "call_by_name",
      "**Instantiate a class.**  NAME(*args).\n\n"
      "- `NAME` may be a bare class name (`Point`) or a dotted\n"
@@ -2713,7 +2752,7 @@ class AddNodePopup(QMenu):
         self._menus = {}
 
         self.search = QLineEdit(self)
-        self.search.setPlaceholderText("Search…")
+        self.search.setPlaceholderText("Search…  (try cat:Torch/nn)")
         self.search.setStyleSheet(
             "QLineEdit{background:#3C3C3C;border:1px solid #555;"
             "border-radius:3px;padding:3px 6px;color:#EEE;}"
@@ -2765,34 +2804,55 @@ class AddNodePopup(QMenu):
     def _add(self, template):
         self.node_scene.add_node_from_template(template, self.scene_pos)
 
+    def _parse_query(self, text):
+        cats = []
+        words = []
+        for tok in text.strip().split():
+            low = tok.lower()
+            if (low.startswith("cat:")
+                    or low.startswith("category:")
+                    or low.startswith("path:")):
+                val = tok.split(":", 1)[1].strip().lower()
+                if val:
+                    cats.append(val)
+            else:
+                words.append(low)
+        return cats, words
+
     def _refilter(self, text):
-        words = [w for w in text.strip().lower().split() if w]
+        cats, words = self._parse_query(text)
         for top in self.actions():
             menu = top.menu()
             if menu is None:
                 continue
-            any_visible = self._filter_menu(menu, words, "")
+            any_visible = self._filter_menu(menu, cats, words, "")
             top.setVisible(any_visible)
 
-    def _filter_menu(self, menu, words, prefix):
+    def _filter_menu(self, menu, cats, words, prefix):
         title = menu.title() or ""
-        path_here = (prefix + " " + title).strip().lower()
+        path_here = (prefix + "/" + title).strip("/").lower()
         any_visible = False
         for act in menu.actions():
             sub = act.menu()
             if sub is not None:
-                v = self._filter_menu(sub, words, path_here)
+                v = self._filter_menu(sub, cats, words, path_here)
                 act.setVisible(v)
                 any_visible = any_visible or v
             else:
                 st = (act.property("search_text") or "").lower()
                 full = st + " " + path_here
-                if not words:
-                    show = True
-                else:
-                    show = all(w in full for w in words)
-                act.setVisible(show)
-                any_visible = any_visible or show
+                self_match = True
+                for c in cats:
+                    if c not in path_here:
+                        self_match = False
+                        break
+                if self_match:
+                    for w in words:
+                        if w not in full:
+                            self_match = False
+                            break
+                act.setVisible(self_match)
+                any_visible = any_visible or self_match
         return any_visible
 
 
@@ -3050,7 +3110,7 @@ class NodeLibraryPanel(QWidget):
                             "letter-spacing:1.5px;")
         v.addWidget(title)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter…")
+        self.search.setPlaceholderText("Filter  (try cat:Torch/nn)")
         self.search.textChanged.connect(self._filter)
         v.addWidget(self.search)
         self.tree = QTreeWidget()
@@ -3116,25 +3176,62 @@ class NodeLibraryPanel(QWidget):
             parent = item
         return parent
 
-    def _full_text(self, item):
+    def _library_path(self, item):
         parts = [item.text(0)]
         p = item.parent()
         while p is not None:
             parts.append(p.text(0))
             p = p.parent()
-        return " ".join(parts).lower()
+        parts.reverse()
+        return parts
 
-    def _apply_filter(self, item, words):
-        if not words:
+    def _full_text(self, item):
+        return " ".join(self._library_path(item)).lower()
+
+    def _parse_query(self, text):
+        """Parse a filter query.
+
+        Tokens of the form  cat:X  /  category:X  /  path:X
+        restrict the search to items whose category path
+        contains X.  All other tokens are plain substrings that
+        must each appear somewhere in the path.
+        """
+        cats = []
+        words = []
+        for tok in text.strip().split():
+            low = tok.lower()
+            if (low.startswith("cat:")
+                    or low.startswith("category:")
+                    or low.startswith("path:")):
+                val = tok.split(":", 1)[1].strip().lower()
+                if val:
+                    cats.append(val)
+            else:
+                words.append(low)
+        return cats, words
+
+    def _apply_filter(self, item, cats, words):
+        if not cats and not words:
             item.setHidden(False)
             for i in range(item.childCount()):
-                self._apply_filter(item.child(i), words)
+                self._apply_filter(item.child(i), cats, words)
             return True
-        full = self._full_text(item)
-        self_match = all(w in full for w in words)
+        path = self._library_path(item)
+        catpath = "/".join(path[:-1]).lower()
+        full = " ".join(path).lower()
+        self_match = True
+        for c in cats:
+            if c not in catpath:
+                self_match = False
+                break
+        if self_match:
+            for w in words:
+                if w not in full:
+                    self_match = False
+                    break
         any_child = False
         for i in range(item.childCount()):
-            if self._apply_filter(item.child(i), words):
+            if self._apply_filter(item.child(i), cats, words):
                 any_child = True
         visible = self_match or any_child
         item.setHidden(not visible)
@@ -3143,10 +3240,10 @@ class NodeLibraryPanel(QWidget):
         return visible
 
     def _filter(self, text):
-        words = [w for w in text.strip().lower().split() if w]
+        cats, words = self._parse_query(text)
         root = self.tree.invisibleRootItem()
         for i in range(root.childCount()):
-            self._apply_filter(root.child(i), words)
+            self._apply_filter(root.child(i), cats, words)
 
     def _library_item_clicked(self, item, col):
         parts = [item.text(0)]
@@ -6146,6 +6243,30 @@ class MainWindow(QMainWindow):
             if kind == "return":
                 L.append("%sreturn %s" % (pad, B.get("Value") or "None"))
                 L.append("%s%s = None" % (pad, var))
+                return L, miss
+
+            if kind == "self_set":
+                _attr_raw = B.get("Name") or "'x'"
+                _attr = str(_attr_raw).strip("\"'")
+                _val = B.get("Value") or "None"
+                L.append("%sself.%s = %s" % (pad, _attr, _val))
+                L.append("%s%s = None" % (pad, var))
+                return L, miss
+            if kind == "self_get":
+                _attr_raw = B.get("Name") or "'x'"
+                _attr = str(_attr_raw).strip("\"'")
+                L.append("%s%s = self.%s" % (pad, var, _attr))
+                return L, miss
+            if kind == "self_method":
+                _meth = str(B.get("Method") or "'m'").strip("\"'")
+                _args = B.get("Args") or "[]"
+                _kw = B.get("Kwargs")
+                if _kw and _kw.strip() not in ("{}", ""):
+                    L.append("%s%s = self.%s(*(%s), **(%s))"
+                             % (pad, var, _meth, _args, _kw))
+                else:
+                    L.append("%s%s = self.%s(*(%s))"
+                             % (pad, var, _meth, _args))
                 return L, miss
             if kind == "import_stmt":
                 m = str(B.get("Module") or "'os'").strip("'\"")
