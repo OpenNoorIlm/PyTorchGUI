@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-create.py — auto-generate main.py from the installed Python package tree
+create.py — auto-generate main.py (or a data file plus loader) from the
+installed Python package tree.
 
-Run:
-    cd ~/Downloads/PyTorchUI
-    python create.py                        # torch only (default)
-    python create.py -l os subprocess       # torch + os + subprocess
-    python create.py -l '[json,math]'       # bracket-style list
-    python create.py --libraries=os,re      # comma-separated
-    python create.py -l os -l subprocess    # repeated flag
-    python main.py                          # launches the editor
-
-Then, inside the editor:
-    Ctrl+G  or  toolbar "Generate"   -> writes generated.py from the graph
-    F5      or  toolbar "Run"        -> runs generated.py
+Usage:
+    python create.py                             # embed specs in main.py
+    python create.py --json                      # write main.json + loader
+    python create.py --db                        # write main.db + loader
+    python create.py --format json               # same as --json
+    python create.py --format db                 # same as --db
+    python create.py -l os subprocess --json     # add libs, output as JSON
+    python create.py --json --json-path nodes.json
+    python create.py --db --db-path nodes.db
 
 Notes
 -----
@@ -22,36 +20,18 @@ Notes
 * Modules walked shallow-first, so torch.nn.Conv2d wins over the
   internal torch.nn.modules.conv.Conv2d.
 * torch is ALWAYS walked, whether or not it appears in --libraries.
-* Budget model: each explicitly-requested library gets its own cap,
-  so a saturated torch tree cannot starve the extras you asked for.
-  --max-nodes sets the per-package cap, not a global one.
+* Budget model: each explicitly-requested library gets its own cap.
+  --max-nodes sets the per-package cap.
 * Top-level modules whose members live in a C extension (io -> _io,
   os -> posix, json -> _json, csv -> _csv, socket -> _socket, ...)
   are collected in full: the ownership check is skipped at depth 0.
 * Deprecation warnings raised by walked modules are suppressed by
   redirecting stderr during the walk.
-
-Exception handling
-------------------
-Every class that is a subclass of BaseException — from torch, from any
-library passed with -l, and from the built-in Built-ins/* roots — is
-moved into a single top-level "Exceptions" category.  Its emitted spec
-also carries a `qualname` field, e.g.
-
-    "qualname": "torch.OutOfMemoryError"
-
-The editor's codegen uses that qualname so a placed exception node
-produces valid Python:
-
-    OutOfMemoryError_1 = torch.OutOfMemoryError()
-
-with the right import (`import torch`) added automatically.  For
-built-in exceptions (OSError, ValueError, ...) the qualname is just
-the bare class name, so `ValueError_1 = ValueError()` is emitted with
-no import.
-
-Emitted main.py calls api.register.node.bulk(SPECS) so the library
-rebuilds exactly once.
+* Every BaseException subclass is moved into a single "Exceptions"
+  category and carries a `qualname` so the codegen can emit valid
+  Python for it.
+* Enum-typed and object-typed parameter defaults are dropped, so the
+  generated file always parses.  (`AwqBackend.AUTO` and friends.)
 """
 
 import argparse
@@ -60,8 +40,10 @@ import datetime
 import importlib
 import inspect
 import io
+import json
 import os
 import pkgutil
+import sqlite3
 import sys
 import warnings
 
@@ -73,11 +55,9 @@ import warnings
 BASE_LIBRARIES = ["torch"]
 BASE_CATEGORY = {"torch": "Torch"}
 
-# Every BaseException subclass ends up under this one category.
 EXCEPTIONS_CATEGORY = "Exceptions"
 EXCEPTIONS_COLOR    = "#A03A3A"
 
-# Budgets, in nodes.  Per-package, not global.
 PER_PACKAGE_CAP  = 500
 BASE_PACKAGE_CAP = 2000
 EXTRA_ROOT_CAP   = 150
@@ -94,15 +74,9 @@ EXTRA_ROOTS = [
     ("Built-ins/tempfile", "tempfile"),
     ("Built-ins/time",     "time"),
     ("Built-ins/datetime", "datetime"),
-    # builtins contributes only its exception classes; the rest of
-    # dir(builtins) is covered by the hand-curated roots above and
-    # by the ROLES in Nodes.py.
     ("Built-ins/Exceptions", "builtins"),
 ]
 
-# Roots whose members get filtered before being collected.  For
-# builtins we only want exceptions — otherwise we'd flood the library
-# with list, dict, int, print, len, ...
 _EXCEPTIONS_ONLY_ROOTS = {"builtins"}
 
 SKIP_PREFIXES = (
@@ -126,6 +100,8 @@ SKIP_PREFIXES = (
 MAX_DEPTH      = 4
 MAX_INPUTS     = 15
 OUT_FILE       = "main.py"
+JSON_FILE      = "main.json"
+DB_FILE        = "main.db"
 PROGRESS_EVERY = 100
 
 COLOR_PALETTE = [
@@ -135,7 +111,7 @@ COLOR_PALETTE = [
 
 
 # ============================================================== #
-#  CLI parsing (argparse)                                        #
+#  CLI                                                           #
 # ============================================================== #
 
 def _split_lib_token(tok):
@@ -160,18 +136,19 @@ def _build_parser():
     p = argparse.ArgumentParser(
         prog="create.py",
         description=(
-            "Auto-generate main.py from the installed Python package "
-            "tree.  torch is always walked first; use --libraries to "
-            "walk additional packages (os, subprocess, json, re, ...)."
+            "Auto-generate the node library from installed Python "
+            "packages.  torch is always walked.  Output can be a plain "
+            "Python file (default), a JSON data file, or a SQLite "
+            "database, in which case a small loader main.py is written."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
             "  create.py\n"
             "  create.py -l os subprocess\n"
-            "  create.py -l '[json,math]'\n"
-            "  create.py --libraries=os,subprocess,re\n"
-            "  create.py -l os -l subprocess -l json\n"
+            "  create.py --json\n"
+            "  create.py --db -l os\n"
+            "  create.py --format json --json-path nodes.json\n"
         ),
     )
     p.add_argument(
@@ -179,27 +156,89 @@ def _build_parser():
         dest="libraries",
         action="append", nargs="*", default=[],
         metavar="NAME",
-        help=("library (or list) to walk in addition to torch. "
-              "Accepts space-separated, comma-separated, or bracketed "
-              "'[os,subprocess]' form.  May be repeated."),
+        help="extra libraries to walk (in addition to torch).",
     )
-    p.add_argument("-o", "--output", dest="out_file", default=OUT_FILE,
-                   metavar="PATH", help="output file (default: %(default)s)")
-    p.add_argument("--max-nodes", dest="max_nodes", type=int,
-                   default=BASE_PACKAGE_CAP, metavar="N",
-                   help=("per-package cap on nodes.  Torch uses this value; "
-                         "each extra library uses the same value.  "
-                         "(default: %(default)s)"))
-    p.add_argument("--max-depth", dest="max_depth", type=int,
-                   default=MAX_DEPTH, metavar="N",
-                   help="maximum submodule depth to walk (default: %(default)s)")
-    p.add_argument("--quiet", dest="quiet", action="store_true",
-                   help="suppress progress output")
+    p.add_argument(
+        "--format", "-f",
+        dest="fmt",
+        choices=("py", "json", "db"),
+        default=None,
+        help="output format.  py = embed specs in main.py (default).  "
+             "json = write main.json + loader.  db = write main.db + "
+             "loader.",
+    )
+    p.add_argument(
+        "--json",
+        dest="use_json",
+        action="store_true",
+        help="shortcut for --format json",
+    )
+    p.add_argument(
+        "--db",
+        dest="use_db",
+        action="store_true",
+        help="shortcut for --format db",
+    )
+    p.add_argument(
+        "-o", "--output",
+        dest="out_file",
+        default=OUT_FILE,
+        metavar="PATH",
+        help="output main.py path (default: %(default)s)",
+    )
+    p.add_argument(
+        "--json-path",
+        dest="json_path",
+        default=JSON_FILE,
+        metavar="PATH",
+        help="json data path when --json is used (default: %(default)s)",
+    )
+    p.add_argument(
+        "--db-path",
+        dest="db_path",
+        default=DB_FILE,
+        metavar="PATH",
+        help="sqlite path when --db is used (default: %(default)s)",
+    )
+    p.add_argument(
+        "--max-nodes",
+        dest="max_nodes",
+        type=int,
+        default=BASE_PACKAGE_CAP,
+        metavar="N",
+        help="per-package cap on nodes (default: %(default)s)",
+    )
+    p.add_argument(
+        "--max-depth",
+        dest="max_depth",
+        type=int,
+        default=MAX_DEPTH,
+        metavar="N",
+        help="maximum submodule depth (default: %(default)s)",
+    )
+    p.add_argument(
+        "--quiet", action="store_true",
+        help="suppress progress output",
+    )
     return p
 
 
+def _resolve_format(args):
+    """Precedence: --json / --db flags > --format > default 'py'."""
+    if args.use_json and args.use_db:
+        print("! --json and --db are mutually exclusive")
+        sys.exit(2)
+    if args.use_json:
+        return "json"
+    if args.use_db:
+        return "db"
+    if args.fmt:
+        return args.fmt
+    return "py"
+
+
 # ============================================================== #
-#  Package list construction                                     #
+#  Package list                                                  #
 # ============================================================== #
 
 def build_packages(extra_libs):
@@ -212,7 +251,6 @@ def build_packages(extra_libs):
         if not name or name in seen:
             continue
         seen.add(name); ordered.append(name)
-
     out = []
     for name in ordered:
         cat = BASE_CATEGORY.get(name) or name.split(".")[0]
@@ -221,7 +259,7 @@ def build_packages(extra_libs):
 
 
 # ============================================================== #
-#  Emit helpers                                                  #
+#  Helpers                                                       #
 # ============================================================== #
 
 def py_str(s):
@@ -291,6 +329,7 @@ def get_params(obj):
             params = list(sig.parameters.values())
     except (ValueError, TypeError):
         return []
+
     out = []
     for p in params:
         if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
@@ -301,10 +340,6 @@ def get_params(obj):
         if p.default is inspect.Parameter.empty:
             desc, dv = "", None
         else:
-            # A default is only usable if its repr() is a valid Python
-            # literal.  Enums (AwqBackend.AUTO, etc.), tensors,
-            # dataclasses, and custom objects all produce <...>-shaped
-            # reprs that break the generated file.  We drop those.
             import enum as _enum
 
             def _is_literal_default(x):
@@ -322,7 +357,6 @@ def get_params(obj):
                 desc = "Default: %r" % (p.default,)
             except Exception:
                 desc = "Has default"
-
             if not _is_literal_default(p.default):
                 dv = None
             else:
@@ -330,8 +364,7 @@ def get_params(obj):
                     r = repr(p.default)
                 except Exception:
                     r = ""
-                if (not r
-                        or r.startswith("<")
+                if (not r or r.startswith("<")
                         or r.endswith(">")
                         or " object at 0x" in r):
                     dv = None
@@ -345,10 +378,6 @@ def get_params(obj):
     return out
 
 
-# ============================================================== #
-#  Exception detection                                           #
-# ============================================================== #
-
 def _is_exception_class(obj):
     try:
         return (inspect.isclass(obj)
@@ -358,23 +387,6 @@ def _is_exception_class(obj):
 
 
 def _exception_qualname(obj, fallback_name):
-    """
-    Return the Python expression the codegen should emit for `obj`.
-
-    Examples
-    --------
-    ValueError                       -> "ValueError"          (builtin)
-    os.error (alias of OSError)      -> "OSError"             (builtin)
-    torch.OutOfMemoryError           -> "torch.OutOfMemoryError"
-    subprocess.CalledProcessError    -> "subprocess.CalledProcessError"
-    csv.Error                        -> "csv.Error"
-
-    The rule:
-      * if the exception's __module__ is "builtins" (or empty), use just
-        its name — no import needed
-      * otherwise prefix the name with its __module__ — the editor's
-        codegen will turn that prefix into an `import <module>` statement
-    """
     try:
         module = getattr(obj, "__module__", "") or ""
     except Exception:
@@ -386,7 +398,6 @@ def _exception_qualname(obj, fallback_name):
         name = None
     if not name:
         name = getattr(obj, "__name__", None) or fallback_name
-    # strip <locals> if it ever leaks out of a factory function
     name = name.replace(".<locals>.", ".")
     if not module or module == "builtins":
         return name
@@ -394,7 +405,7 @@ def _exception_qualname(obj, fallback_name):
 
 
 # ============================================================== #
-#  Module discovery                                              #
+#  Discovery                                                     #
 # ============================================================== #
 
 def _skip_module(name):
@@ -422,11 +433,9 @@ def discover_modules(root_cat, package_name, max_depth, quiet=False):
         if not quiet:
             print("  ! could not import %s" % package_name)
         return results
-
     pkg_path = getattr(pkg, "__path__", None)
     if pkg_path is None:
         return results
-
     base_depth = package_name.count(".")
     err_buf = io.StringIO()
     try:
@@ -449,7 +458,6 @@ def discover_modules(root_cat, package_name, max_depth, quiet=False):
     except BaseException as ex:
         if not quiet:
             print("  ! walk failed for %s: %s" % (package_name, ex))
-
     results.sort(key=lambda r: (r[2], r[1]))
     return results
 
@@ -459,25 +467,16 @@ def discover_modules(root_cat, package_name, max_depth, quiet=False):
 # ============================================================== #
 
 def collect_from_module(cat, mod_path, seen_names, specs_out, limit):
-    """
-    Collect classes/functions from one module into specs_out, stopping
-    when specs_out already holds `limit` entries.
-    """
     if len(specs_out) >= limit:
         return 0
-
     mod = _safe_import(mod_path)
     if mod is None:
         return 0
-
     top_level = "." not in mod_path
     root = mod_path.split(".")[0]
     real_root = getattr(mod, "__name__", root).split(".")[0]
     roots = {root, real_root}
-
-    # If this root only contributes exceptions, skip everything else.
     exc_only = mod_path in _EXCEPTIONS_ONLY_ROOTS
-
     added = 0
     for name in dir(mod):
         if len(specs_out) >= limit:
@@ -496,23 +495,16 @@ def collect_from_module(cat, mod_path, seen_names, specs_out, limit):
             obj_mod = getattr(obj, "__module__", "") or ""
             if not any(obj_mod.startswith(r) for r in roots):
                 continue
-
         is_exc = _is_exception_class(obj)
-
         if exc_only and not is_exc:
             continue
-
         seen_names.add(name)
-
         if is_exc:
-            # Move to the shared Exceptions category and give it the
-            # qualname the codegen needs to produce valid Python.
-            spec_cat  = EXCEPTIONS_CATEGORY
-            qualname  = _exception_qualname(obj, name)
+            spec_cat = EXCEPTIONS_CATEGORY
+            qualname = _exception_qualname(obj, name)
         else:
-            spec_cat  = cat
-            qualname  = None
-
+            spec_cat = cat
+            qualname = None
         specs_out.append({
             "name":        name,
             "color":       color_for(spec_cat),
@@ -532,12 +524,10 @@ def _walk_one_package(cat, pkg, seen_names, max_depth, cap, quiet=False):
     def say(*a):
         if not quiet:
             print(*a)
-
     pkg_specs = []
     modules = discover_modules(cat, pkg, max_depth, quiet)
     say("  %-16s -> %-10s (%d modules)" % (pkg, cat, len(modules)))
-
-    for i, (mcat, mod_path, _depth) in enumerate(modules, 1):
+    for i, (mcat, mod_path, _d) in enumerate(modules, 1):
         if not quiet and i % PROGRESS_EVERY == 0:
             say("    ... %d / %d modules, %d nodes"
                 % (i, len(modules), len(pkg_specs)))
@@ -545,7 +535,6 @@ def _walk_one_package(cat, pkg, seen_names, max_depth, cap, quiet=False):
         if len(pkg_specs) >= cap:
             say("    cap reached for %s (%d nodes)" % (pkg, cap))
             break
-
     return pkg_specs
 
 
@@ -553,32 +542,27 @@ def collect(packages, max_depth, max_nodes, quiet=False):
     def say(*a):
         if not quiet:
             print(*a)
-
     all_specs = []
     seen_names = set()
-
     say("discovering modules ...")
-
-    for i, (cat, pkg) in enumerate(packages):
+    for cat, pkg in packages:
         pkg_specs = _walk_one_package(
             cat, pkg, seen_names, max_depth, max_nodes, quiet)
         all_specs.extend(pkg_specs)
         say("    -> %s: %d nodes" % (pkg, len(pkg_specs)))
-
     for cat, mod_path in EXTRA_ROOTS:
         pkg_specs = _walk_one_package(
             cat, mod_path, seen_names, max_depth, EXTRA_ROOT_CAP, quiet)
         all_specs.extend(pkg_specs)
-
     all_specs.sort(key=lambda s: (s["category"], s["name"].lower()))
     return all_specs
 
 
 # ============================================================== #
-#  Emit main.py                                                  #
+#  emit — Python (embed SPECS)                                   #
 # ============================================================== #
 
-HEADER = '''\
+HEADER_EMBED = '''\
 # Auto-generated by create.py — do not edit by hand.
 #
 # Source:  torch {version} ({torch_path})
@@ -602,9 +586,69 @@ except ImportError:
                        PATH_IN_NAME, PATH_OUT_NAME)
 
 
-# ============================================================== #
-#  ENVIRONMENT DIAGNOSTICS                                       #
-# ============================================================== #
+def _print_env():
+    import sys
+    print("Python  %s" % sys.version.split()[0])
+    try:
+        import matplotlib
+        print("matplotlib %s" % matplotlib.__version__)
+    except Exception as ex:
+        print("matplotlib NOT available (%s)" % ex)
+    try:
+        import PyQt5
+        from PyQt5.QtCore import QT_VERSION_STR
+        print("Qt      %s" % QT_VERSION_STR)
+    except Exception:
+        pass
+
+_print_env()
+
+
+api = API.instance()
+api.clear()
+api.register.node.clear()
+
+try:
+    try:
+        from helpers.Nodes.Nodes import _register_builtins, _register_roles
+    except ImportError:
+        from Nodes import _register_builtins, _register_roles
+    _register_builtins(api)
+    _register_roles(api)
+except Exception as _e:
+    print("[builtins] restore failed:", _e)
+
+
+SPECS = [
+'''
+
+# Loader header, used for --json and --db
+HEADER_LOADER = '''\
+# Auto-generated loader by create.py — do not edit by hand.
+#
+# Data file:  {data_file}
+# Format:     {data_format}
+# Source:     torch {version} ({torch_path})
+# Date:       {date}
+# Nodes:      {node_count}
+#
+# The specs live in {data_file}, not in this file.  Regenerate the
+# data with `python create.py --{data_format}`.  This loader reads
+# whichever data file is present (json or db) and registers each spec.
+
+import json
+import os
+import sqlite3
+
+try:
+    from helpers.Nodes.Nodes import (API, section, in_, out,
+                                     PATH_TYPE,
+                                     PATH_IN_NAME, PATH_OUT_NAME)
+except ImportError:
+    from Nodes import (API, section, in_, out,
+                       PATH_TYPE,
+                       PATH_IN_NAME, PATH_OUT_NAME)
+
 
 def _print_env():
     import sys
@@ -624,9 +668,38 @@ def _print_env():
 _print_env()
 
 
-# ============================================================== #
-#  BOOT                                                          #
-# ============================================================== #
+def _load_specs(json_path, db_path):
+    """Read specs from whichever data file exists.  JSON wins."""
+    if os.path.isfile(json_path):
+        print("[loader] reading %s" % json_path)
+        with open(json_path, "r", encoding="utf-8") as f:
+            return json.load(f).get("nodes", [])
+    if os.path.isfile(db_path):
+        print("[loader] reading %s" % db_path)
+        con = sqlite3.connect(db_path)
+        try:
+            cur = con.cursor()
+            cur.execute(
+                "SELECT name, color, category, description, "
+                "qualname, inputs, outputs, full_path FROM nodes")
+            out = []
+            for row in cur.fetchall():
+                out.append({
+                    "name":        row[0],
+                    "color":       row[1],
+                    "category":    row[2],
+                    "description": row[3],
+                    "qualname":    row[4],
+                    "inputs":      json.loads(row[5]) if row[5] else [],
+                    "outputs":     json.loads(row[6]) if row[6] else [],
+                    "full_path":   row[7],
+                })
+            return out
+        finally:
+            con.close()
+    print("[loader] no data file found; starting with an empty library")
+    return []
+
 
 api = API.instance()
 api.clear()
@@ -643,21 +716,14 @@ except Exception as _e:
     print("[builtins] restore failed:", _e)
 
 
-# ============================================================== #
-#  GENERATED NODES                                               #
-# ============================================================== #
-
-SPECS = [
-'''
-
-FOOTER = '''\
-]
-
+SPECS = _load_specs({json_path!r}, {db_path!r})
 for _s in SPECS:
     _s["on_exists"] = "keep"
 n_ok, n_bad = api.register.node.bulk(SPECS)
 print("Registered %d / %d templates" % (n_ok, n_ok + n_bad))
+'''
 
+FOOTER = '''\
 
 # ============================================================== #
 #  CUSTOM NODES                                                  #
@@ -737,10 +803,10 @@ def _format_libraries_line(packages):
     return "".join(lines)
 
 
-def emit(specs, out_file, torch_version, torch_path, packages):
+def emit_python(specs, out_file, torch_version, torch_path, packages):
     date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(out_file, "w", encoding="utf-8") as f:
-        f.write(HEADER.format(
+        f.write(HEADER_EMBED.format(
             version=torch_version, torch_path=torch_path,
             out_file=out_file, date=date,
             node_count=len(specs),
@@ -753,9 +819,6 @@ def emit(specs, out_file, torch_version, torch_path, packages):
             f.write('        "color":       %s,\n' % py_str(spec["color"]))
             f.write('        "category":    %s,\n' % py_str(spec["category"]))
             f.write('        "description": %s,\n' % py_str(spec["description"]))
-            # Emit qualname only for exception specs.  Non-exception
-            # specs keep the old behaviour where the codegen infers the
-            # import from the category (Torch/nn -> nn.Linear).
             if spec.get("qualname"):
                 f.write('        "qualname":    %s,\n'
                         % py_str(spec["qualname"]))
@@ -774,6 +837,140 @@ def emit(specs, out_file, torch_version, torch_path, packages):
                         % (py_str(n), py_str(t), py_str(d)))
             f.write("        ],\n")
             f.write("    },\n\n")
+        f.write("]\n\n")
+        f.write("for _s in SPECS:\n")
+        f.write("    _s[\"on_exists\"] = \"keep\"\n")
+        f.write("n_ok, n_bad = api.register.node.bulk(SPECS)\n")
+        f.write("print(\"Registered %d / %d templates\" "
+                "% (n_ok, n_ok + n_bad))\n")
+        f.write(FOOTER)
+
+
+# ============================================================== #
+#  emit — JSON + loader                                          #
+# ============================================================== #
+
+def _spec_to_json(spec):
+    """Tuples are not JSON; convert them to lists."""
+    return {
+        "name":        spec["name"],
+        "color":       spec["color"],
+        "category":    spec["category"],
+        "description": spec["description"],
+        "qualname":    spec.get("qualname"),
+        "inputs":      [list(t) for t in spec["inputs"]],
+        "outputs":     [list(t) for t in spec["outputs"]],
+        "full_path":   spec["full_path"],
+    }
+
+
+def emit_json(specs, out_file, json_path,
+              torch_version, torch_path, packages):
+    date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    payload = {
+        "format":        "pytorchui-nodes",
+        "version":       1,
+        "torch_version": torch_version,
+        "torch_path":    torch_path,
+        "generated":     date,
+        "node_count":    len(specs),
+        "libraries":     [name for _cat, name in packages],
+        "builtin_roots": [name for _cat, name in EXTRA_ROOTS],
+        "nodes":         [_spec_to_json(s) for s in specs],
+    }
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    header = (HEADER_LOADER
+              .replace("{json_path!r}", repr(json_path))
+              .replace("{db_path!r}", repr(DB_FILE))
+              .replace("{data_file}", json_path)
+              .replace("{data_format}", "json")
+              .replace("{version}", torch_version)
+              .replace("{torch_path}", torch_path)
+              .replace("{date}", date)
+              .replace("{node_count}", str(len(specs))))
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write(header)
+        f.write(FOOTER)
+
+
+# ============================================================== #
+#  emit — SQLite + loader                                        #
+# ============================================================== #
+
+def emit_db(specs, out_file, db_path,
+            torch_version, torch_path, packages):
+    date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if os.path.isfile(db_path):
+        os.remove(db_path)
+
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("""
+            CREATE TABLE metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        for k, v in (
+            ("format", "pytorchui-nodes"),
+            ("version", "1"),
+            ("torch_version", torch_version),
+            ("torch_path", torch_path),
+            ("generated", date),
+            ("node_count", str(len(specs))),
+        ):
+            con.execute("INSERT INTO metadata VALUES (?, ?)", (k, v))
+
+        con.execute("""
+            CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                color TEXT,
+                category TEXT,
+                description TEXT,
+                qualname TEXT,
+                inputs TEXT,
+                outputs TEXT,
+                full_path TEXT,
+                UNIQUE(name)
+            )
+        """)
+        con.execute("CREATE INDEX idx_nodes_category ON nodes(category)")
+        con.execute("CREATE INDEX idx_nodes_full_path ON nodes(full_path)")
+
+        for s in specs:
+            con.execute(
+                "INSERT OR IGNORE INTO nodes "
+                "(name, color, category, description, qualname, "
+                " inputs, outputs, full_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    s["name"], s["color"], s["category"],
+                    s["description"], s.get("qualname"),
+                    json.dumps([list(t) for t in s["inputs"]]),
+                    json.dumps([list(t) for t in s["outputs"]]),
+                    s["full_path"],
+                ),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        _hdr = (HEADER_LOADER
+                .replace("{json_path!r}", repr(JSON_FILE))
+                .replace("{db_path!r}", repr(db_path))
+                .replace("{data_file}", db_path)
+                .replace("{data_format}", "db")
+                .replace("{version}", torch_version)
+                .replace("{torch_path}", torch_path)
+                .replace("{date}", date)
+                .replace("{node_count}", str(len(specs))))
+        f.write(_hdr)
         f.write(FOOTER)
 
 
@@ -783,14 +980,16 @@ def emit(specs, out_file, torch_version, torch_path, packages):
 
 def main(argv=None):
     warnings.filterwarnings("ignore")
-
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    fmt = _resolve_format(args)
+
     extra_libs = _flatten_libraries(args.libraries)
-    packages   = build_packages(extra_libs)
+    packages = build_packages(extra_libs)
 
     if not args.quiet:
+        print("output format:", fmt)
         print("roots to walk (torch is always first):")
         for cat, name in packages:
             print("  %-20s  ->  %s" % (name, cat))
@@ -815,20 +1014,37 @@ def main(argv=None):
         for cat, n in sorted(c.items()):
             print("  %-30s %d nodes" % (cat, n))
 
-    if os.path.isfile(args.out_file):
-        try:
-            os.remove(args.out_file)
-            if not args.quiet:
-                print("Removed old %s" % args.out_file)
-        except OSError as ex:
-            print("  ! could not remove %s: %s" % (args.out_file, ex))
+    # Remove the old output(s) so a crash mid-write can't leave stale
+    # content behind.
+    for p in (args.out_file, args.json_path, args.db_path):
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+                if not args.quiet:
+                    print("Removed old %s" % p)
+            except OSError as ex:
+                print("  ! could not remove %s: %s" % (p, ex))
 
-    emit(specs, args.out_file, version, path, packages)
-    with open(args.out_file, "r", encoding="utf-8") as f:
-        n = sum(1 for _ in f)
+    if fmt == "py":
+        emit_python(specs, args.out_file, version, path, packages)
+        with open(args.out_file, "r", encoding="utf-8") as f:
+            n = sum(1 for _ in f)
+        if not args.quiet:
+            print("Wrote %s (%d lines)" % (args.out_file, n))
+    elif fmt == "json":
+        emit_json(specs, args.out_file, args.json_path,
+                  version, path, packages)
+        if not args.quiet:
+            print("Wrote %s (data)" % args.json_path)
+            print("Wrote %s (loader)" % args.out_file)
+    elif fmt == "db":
+        emit_db(specs, args.out_file, args.db_path,
+                version, path, packages)
+        if not args.quiet:
+            print("Wrote %s (data)" % args.db_path)
+            print("Wrote %s (loader)" % args.out_file)
 
     if not args.quiet:
-        print("Wrote %s (%d lines)" % (args.out_file, n))
         print()
         print("Next:")
         print("  python main.py")

@@ -3525,6 +3525,35 @@ class ColorSwatch(QPushButton):
             f"QPushButton:hover {{ border:1px solid #E08C4A; }}")
 
 
+def _find_main_window(widget):
+    """Return the top-level MainWindow from any nested widget.
+
+    QDialog and other top-level widgets make widget.window() return
+    themselves, not the MainWindow, so we walk the parent chain and
+    (falling back) scan all top-level widgets for one that has both
+    `library` and `scene`.
+    """
+    try:
+        cur = widget
+        while cur is not None:
+            if (hasattr(cur, "library")
+                    and hasattr(cur, "scene")):
+                return cur
+            cur = cur.parent()
+    except Exception:
+        pass
+    try:
+        app = QApplication.instance()
+        if app is not None:
+            for w in app.topLevelWidgets():
+                if (hasattr(w, "library")
+                        and hasattr(w, "scene")):
+                    return w
+    except Exception:
+        pass
+    return None
+
+
 class _LibraryFilterDialog(QDialog):
     """Checkbox tree of categories with a search bar and bulk expand."""
 
@@ -3738,15 +3767,19 @@ class _LibraryFilterDialog(QDialog):
             _lib_filter_save()
         except Exception as _e:
             print("[filter] save skipped:", _e)
-        win = self.window()
+        win = _find_main_window(self)
+        if win is None:
+            print("[filter] could not locate MainWindow")
+            self.accept()
+            return
         try:
             win.library.refresh()
-        except Exception:
-            pass
+        except Exception as _e:
+            print("[filter] refresh failed:", _e)
         try:
             win._persist_settings()
-        except Exception:
-            pass
+        except Exception as _e:
+            print("[filter] persist skipped:", _e)
         self.accept()
 
 
@@ -6285,7 +6318,8 @@ class MainWindow(QMainWindow):
 
     def _show_image_dialog(self, nid, path):
         from PyQt5.QtGui import QPixmap
-        dlg = QDialog(self)
+        parent = _find_main_window(self) or self
+        dlg = QDialog(parent)
         dlg.setWindowTitle("Image \u2014 %s" % nid)
         dlg.setStyleSheet("QDialog{background:#202020;}")
         v = QVBoxLayout(dlg)
