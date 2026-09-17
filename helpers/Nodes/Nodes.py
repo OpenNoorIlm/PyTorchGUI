@@ -421,6 +421,54 @@ ROLES = [
      "**input(prompt).**  Pop a dialog and read the typed value.",
      [("Prompt", "string", "Prompt", "'Enter: '")],
      [("Result", "string", "Text")], None, None),
+
+    # ----- files -----
+    ("Built-ins/IO", "File Open", "file_open",
+     "**open(path, mode).**  Returns a file handle.\n\n"
+     "The `Mode` dropdown selects the standard Python mode flags.\n"
+     "Use it with a **With** node to guarantee the file closes:\n"
+     "wire the handle into `With.Context`, name it, then use\n"
+     "**File Read** / **File Write** or a **Method Call** inside.\n\n"
+     "Common modes:\n"
+     "- `r`  read text (default)\n"
+     "- `w`  write text, truncate\n"
+     "- `a`  append text\n"
+     "- `rb` / `wb` / `ab`  binary variants\n"
+     "- `r+` / `w+`  read+write",
+     [("Path", "string", "File path", "'data.txt'"),
+      ("Mode", "string", "Open mode", "'r'",
+       ["'r'", "'w'", "'a'", "'x'",
+        "'rb'", "'wb'", "'ab'",
+        "'r+'", "'w+'", "'rb+'", "'wb+'"])],
+     [("File", "any", "File handle")], None, None),
+    ("Built-ins/IO", "File Read", "file_read",
+     "**Read entire file.**  Opens, reads, closes.",
+     [("Path", "string", "File path", "'data.txt'")],
+     [("Result", "string", "File contents")], None, None),
+    ("Built-ins/IO", "File Write", "file_write",
+     "**Write entire file.**  Opens, writes, closes.",
+     [("Path", "string", "File path", "'out.txt'"),
+      ("Content", "string", "Text to write", "''")],
+     [], None, None),
+
+    # ----- media -----
+    ("Built-ins/Media", "Image Viewer", "image_viewer",
+     "**Show an image.**\n\n"
+     "Accept a path (str), a PIL image, or a torch Tensor.\n"
+     "Tensors and PIL images are saved to a temp PNG so the editor\n"
+     "can display them.  The popup is non-modal; the run continues.\n\n"
+     "Tensor layouts handled: (N, C, H, W), (C, H, W), (H, W),\n"
+     "with C in {1, 3, 4}.  Values are normalised to [0, 1].",
+     [("Source", "any", "Path, PIL image, or tensor", "None")],
+     [], None, None),
+    ("Built-ins/Media", "Audio Player", "audio_player",
+     "**Play an audio file.**  Path to .wav/.mp3/.ogg/\u2026",
+     [("Source", "any", "Path or bytes", "None")],
+     [], None, None),
+    ("Built-ins/Media", "Video Player", "video_player",
+     "**Play a video file.**  Path to .mp4/.mkv/.webm/\u2026",
+     [("Source", "any", "Path", "None")],
+     [], None, None),
 ]
 
 
@@ -429,6 +477,9 @@ def _register_roles(api):
     def _in_list(pairs):
         out = []
         for tup in pairs:
+            if len(tup) == 5:
+                out.append(tup)
+                continue
             name, t, desc, default = tup
             out.append((name, t, desc, default) if default is not None
                        else (name, t, desc))
@@ -537,9 +588,72 @@ class _Runtime:
 
     def _emit(self, *parts):
         try:
-            print("@@RT", *parts, flush=True)
+            import sys as _sys
+            out = getattr(_sys, "__stdout__", None) or _sys.stdout
+            out.write("@@RT " + " ".join(str(p) for p in parts) + "\n")
+            out.flush()
         except Exception:
             pass
+
+    def media_show(self, node_id, kind, payload):
+        """Emit a @@RT media marker after materialising the payload.
+
+        payload may be a filesystem path (str), a PIL image, or a
+        torch.Tensor.  Tensors and PIL images are written to a
+        temporary PNG file so the parent process can load them.
+        """
+        path = self._materialize_media(payload)
+        if path:
+            self._emit("media", str(node_id),
+                       json.dumps({"kind": kind, "path": path}))
+
+    def _materialize_media(self, payload):
+        import os as _os
+        import tempfile as _tmp
+        if isinstance(payload, str):
+            if _os.path.isfile(payload):
+                return _os.path.abspath(payload)
+            return None
+        try:
+            if hasattr(payload, "save") and hasattr(payload, "size"):
+                f = _tmp.NamedTemporaryFile(suffix=".png", delete=False)
+                f.close()
+                payload.save(f.name)
+                return f.name
+        except Exception:
+            pass
+        try:
+            import torch as _torch
+            if not isinstance(payload, _torch.Tensor):
+                return None
+            img = payload
+            if img.dim() == 4:
+                img = img[0]
+            if img.dim() == 3 and img.shape[0] in (1, 3, 4):
+                img = img.permute(1, 2, 0)
+            arr = img.detach().cpu().float().numpy()
+            arr = arr - arr.min()
+            if arr.max() > 0:
+                arr = arr / arr.max()
+            arr = (arr * 255).astype("uint8")
+            from PIL import Image as _Image
+            if arr.ndim == 2:
+                pil = _Image.fromarray(arr, "L")
+            elif arr.shape[-1] == 1:
+                pil = _Image.fromarray(arr[..., 0], "L")
+            elif arr.shape[-1] == 3:
+                pil = _Image.fromarray(arr, "RGB")
+            elif arr.shape[-1] == 4:
+                pil = _Image.fromarray(arr, "RGBA")
+            else:
+                return None
+            f = _tmp.NamedTemporaryFile(suffix=".png", delete=False)
+            f.close()
+            pil.save(f.name)
+            return f.name
+        except Exception as ex:
+            print("[media] tensor conversion failed:", ex)
+        return None
 
     def _check_pause(self):
         if not os.path.exists(_PAUSE_FLAG_FILE):
@@ -743,6 +857,72 @@ _REROUTE = {
     "flow":    True,
     "data":    True,
 }
+
+
+
+# --------------------------------------------------------------------------- #
+#  Library filter (non-coder UI)                                              #
+# --------------------------------------------------------------------------- #
+
+_LIBRARY_FILTER = {"disabled": set()}   # set of category paths, "/"-joined
+
+
+
+# --------------------------------------------------------------------------- #
+#  Library filter persistence (side-car, independent of settings.json)        #
+# --------------------------------------------------------------------------- #
+
+_LIB_FILTER_FILE = os.path.join(
+    os.path.expanduser("~"), ".pytorchui", "library_filter.json")
+
+
+def _lib_filter_save():
+    try:
+        os.makedirs(os.path.dirname(_LIB_FILTER_FILE), exist_ok=True)
+        tmp = _LIB_FILTER_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sorted(_LIBRARY_FILTER["disabled"]), f)
+        os.replace(tmp, _LIB_FILTER_FILE)
+    except Exception as ex:
+        print("[filter] save failed:", ex)
+
+
+def _lib_filter_load():
+    try:
+        with open(_LIB_FILTER_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            _LIBRARY_FILTER["disabled"] = set(str(x) for x in data)
+    except FileNotFoundError:
+        pass
+    except Exception as ex:
+        print("[filter] load failed:", ex)
+
+
+def _iter_category_paths():
+    """Yield every unique category path (prefixes included) in sorted order."""
+    seen = set()
+    for cat, _tpls in NODE_TEMPLATES:
+        if isinstance(cat, (list, tuple)):
+            parts = [str(p) for p in cat]
+        else:
+            parts = [p for p in str(cat).split("/") if p]
+        for i in range(1, len(parts) + 1):
+            seen.add("/".join(parts[:i]))
+    return sorted(seen)
+
+
+def _is_category_disabled(path):
+    if not _LIBRARY_FILTER["disabled"]:
+        return False
+    if isinstance(path, (list, tuple)):
+        parts = [str(p) for p in path]
+    else:
+        parts = [p for p in str(path).split("/") if p]
+    for i in range(1, len(parts) + 1):
+        if "/".join(parts[:i]) in _LIBRARY_FILTER["disabled"]:
+            return True
+    return False
 
 
 def _truncate_words(text, limit=100):
@@ -1015,7 +1195,8 @@ class HoverTooltip(QGraphicsItem):
 # --------------------------------------------------------------------------- #
 
 class NodeSocket(QGraphicsItem):
-    def __init__(self, node, name, socket_type, is_input, description="", value=None):
+    def __init__(self, node, name, socket_type, is_input,
+                 description="", value=None, options=None):
         super().__init__(node)
         self.node = node
         self.name = name
@@ -1023,6 +1204,7 @@ class NodeSocket(QGraphicsItem):
         self.is_input = is_input
         self.description = description
         self.value = value
+        self.options = options
         self.connections = []
         self.radius = SOCKET_RADIUS
         self._hovered = False
@@ -1268,19 +1450,23 @@ class Node(QGraphicsItem):
     def add_section(self, name, description=""):
         return self._new_section(name, description)
 
-    def add_input(self, name, socket_type="float", description="", value=None):
+    def add_input(self, name, socket_type="float", description="",
+                  value=None, options=None):
         if self._current_section is None:
             self._new_section("")
-        s = NodeSocket(self, name, socket_type, True, description, value)
+        s = NodeSocket(self, name, socket_type, True, description,
+                       value, options)
         self._current_section["inputs"].append(s)
         self.inputs.append(s)
         self.layout()
         return s
 
-    def add_output(self, name, socket_type="float", description=""):
+    def add_output(self, name, socket_type="float", description="",
+                   options=None):
         if self._current_section is None:
             self._new_section("")
-        s = NodeSocket(self, name, socket_type, False, description)
+        s = NodeSocket(self, name, socket_type, False, description,
+                       None, options)
         self._current_section["outputs"].append(s)
         self.outputs.append(s)
         self.layout()
@@ -1941,10 +2127,13 @@ def build_node_from_template(template):
             direction = rs[2]
             sock_desc = rs[3] if len(rs) > 3 else ""
             sock_default = rs[4] if len(rs) > 4 else None
+            sock_options = rs[5] if len(rs) > 5 else None
             if direction == "in":
-                n.add_input(sock_name, sock_type, sock_desc, sock_default)
+                n.add_input(sock_name, sock_type, sock_desc,
+                            sock_default, sock_options)
             else:
-                n.add_output(sock_name, sock_type, sock_desc)
+                n.add_output(sock_name, sock_type, sock_desc,
+                             sock_options)
     n.metadata["template"] = template["name"]
     if template.get("flow", True):
         n.add_flow_sockets()
@@ -2771,6 +2960,8 @@ class AddNodePopup(QMenu):
 
     def _build_items(self):
         for category, templates in NODE_TEMPLATES:
+            if _is_category_disabled(category):
+                continue
             parent_menu = self._ensure_menu(category)
             for tpl in templates:
                 act = parent_menu.addAction(tpl["name"])
@@ -3102,6 +3293,10 @@ class NodeLibraryPanel(QWidget):
         self.setObjectName("LeftPanel")
         self.setFixedWidth(230)
         self._cat_items = {}
+        try:
+            _lib_filter_load()
+        except Exception as _e:
+            print("[filter] load skipped:", _e)
         v = QVBoxLayout(self)
         v.setContentsMargins(10, 10, 10, 10)
         v.setSpacing(6)
@@ -3109,10 +3304,27 @@ class NodeLibraryPanel(QWidget):
         title.setStyleSheet("color:#7F7F7F;font-size:10px;font-weight:bold;"
                             "letter-spacing:1.5px;")
         v.addWidget(title)
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(4)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Filter  (try cat:Torch/nn)")
         self.search.textChanged.connect(self._filter)
-        v.addWidget(self.search)
+        search_row.addWidget(self.search, 1)
+        self.btn_filter = QToolButton()
+        self.btn_filter.setText("Filter\u2026")
+        self.btn_filter.setToolTip(
+            "Tick the categories you want to see")
+        self.btn_filter.setCursor(Qt.PointingHandCursor)
+        self.btn_filter.setStyleSheet(
+            "QToolButton{background:#3C3C3C;"
+            "border:1px solid #555;border-radius:3px;"
+            "padding:3px 8px;color:#EEE;}"
+            "QToolButton:hover{background:#4A4A4A;"
+            "border:1px solid #E08C4A;}")
+        self.btn_filter.clicked.connect(self._open_filter_dialog)
+        search_row.addWidget(self.btn_filter)
+        v.addLayout(search_row)
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(14)
@@ -3133,6 +3345,8 @@ class NodeLibraryPanel(QWidget):
         self.tree.clear()
         self._cat_items = {}
         for category, templates in NODE_TEMPLATES:
+            if _is_category_disabled(category):
+                continue
             parent = self._ensure_category(category)
             for tpl in templates:
                 enabled = tpl.get("enabled", True)
@@ -3263,6 +3477,10 @@ class NodeLibraryPanel(QWidget):
         _FOCUS["library_title"] = " / ".join(parts)
         _FOCUS["library_body"] = body
 
+    def _open_filter_dialog(self):
+        dlg = _LibraryFilterDialog(self)
+        dlg.exec_()
+
     def _double_clicked(self, item, col):
         tpl = item.data(0, Qt.UserRole)
         if tpl is not None:
@@ -3305,6 +3523,143 @@ class ColorSwatch(QPushButton):
             f"QPushButton {{ background:{self._color.name()};"
             f" border:1px solid #666; border-radius:3px; }}"
             f"QPushButton:hover {{ border:1px solid #E08C4A; }}")
+
+
+class _LibraryFilterDialog(QDialog):
+    """Checkbox tree of categories.  No individual nodes."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Filter node library")
+        self.setStyleSheet("QDialog { background:#252525; color:#DDD; }")
+        self.resize(420, 560)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+
+        head = QLabel("Show these categories")
+        head.setStyleSheet("font-weight:700; color:#F0F0F0; font-size:13px;")
+        v.addWidget(head)
+
+        sub = QLabel("Uncheck a category to hide every node inside it.")
+        sub.setStyleSheet("color:#8A8A8A; font-size:11px;")
+        v.addWidget(sub)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(16)
+        self.tree.setStyleSheet(
+            "QTreeWidget{background:#1E1E1E; color:#DDD;"
+            " border:1px solid #333; outline:0; padding:4px;}"
+            "QTreeWidget::item{padding:3px 2px;}"
+            "QTreeWidget::item:hover{background:#2E2E2E;}"
+            "QTreeWidget::indicator{width:14px;height:14px;}")
+        self.tree.itemChanged.connect(self._on_item_changed)
+        v.addWidget(self.tree, 1)
+        self._build_tree()
+
+        row = QHBoxLayout()
+        btn_all  = QPushButton("Select All")
+        btn_none = QPushButton("Select None")
+        row.addWidget(btn_all)
+        row.addWidget(btn_none)
+        row.addStretch(1)
+        btn_cancel = QPushButton("Cancel")
+        btn_apply  = QPushButton("Apply")
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_apply)
+        v.addLayout(row)
+
+        btn_all.clicked.connect(lambda: self._set_all(True))
+        btn_none.clicked.connect(lambda: self._set_all(False))
+        btn_cancel.clicked.connect(self.reject)
+        btn_apply.clicked.connect(self._apply)
+
+    def _build_tree(self):
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        self._items = {}
+        for path in _iter_category_paths():
+            parts = path.split("/")
+            parent = self.tree.invisibleRootItem()
+            walked = ""
+            for p in parts:
+                walked = (walked + "/" + p) if walked else p
+                if walked in self._items:
+                    parent = self._items[walked]
+                    continue
+                it = QTreeWidgetItem([p])
+                it.setFlags(Qt.ItemIsUserCheckable
+                            | Qt.ItemIsEnabled
+                            | Qt.ItemIsSelectable)
+                checked = walked not in _LIBRARY_FILTER["disabled"]
+                it.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+                parent.addChild(it)
+                self._items[walked] = it
+                parent = it
+        # propagate tri-state bottom-up
+        for it in list(self._items.values()):
+            if it.childCount():
+                self._refresh_tristate(it)
+        self.tree.expandAll()
+        self.tree.blockSignals(False)
+
+    def _refresh_tristate(self, item):
+        children = [item.child(i) for i in range(item.childCount())]
+        if not children:
+            return
+        states = [c.checkState(0) for c in children]
+        if all(s == Qt.Checked for s in states):
+            item.setCheckState(0, Qt.Checked)
+        elif all(s == Qt.Unchecked for s in states):
+            item.setCheckState(0, Qt.Unchecked)
+        else:
+            item.setCheckState(0, Qt.PartiallyChecked)
+
+    def _on_item_changed(self, item, col):
+        if col != 0:
+            return
+        self.tree.blockSignals(True)
+        state = item.checkState(0)
+        if state != Qt.PartiallyChecked:
+            self._set_subtree(item, state)
+        parent = item.parent()
+        while parent is not None:
+            self._refresh_tristate(parent)
+            parent = parent.parent()
+        self.tree.blockSignals(False)
+
+    def _set_subtree(self, item, state):
+        item.setCheckState(0, state)
+        for i in range(item.childCount()):
+            self._set_subtree(item.child(i), state)
+
+    def _set_all(self, on):
+        self.tree.blockSignals(True)
+        for it in list(self._items.values()):
+            it.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+        self.tree.blockSignals(False)
+
+    def _apply(self):
+        disabled = set()
+        for path, it in self._items.items():
+            if it.checkState(0) == Qt.Unchecked:
+                disabled.add(path)
+        _LIBRARY_FILTER["disabled"] = disabled
+        try:
+            _lib_filter_save()
+        except Exception as _e:
+            print("[filter] save skipped:", _e)
+        win = self.window()
+        try:
+            win.library.refresh()
+        except Exception:
+            pass
+        try:
+            win._persist_settings()
+        except Exception:
+            pass
+        self.accept()
 
 
 class NodeSidebar(QScrollArea):
@@ -3502,6 +3857,20 @@ class NodeSidebar(QScrollArea):
     def _socket_value_row(self, sock):
         if not sock.is_input:
             return None
+        opts = getattr(sock, "options", None)
+        if opts:
+            combo = QComboBox()
+            combo.addItems([str(o) for o in opts])
+            cur = str(sock.value) if sock.value is not None else ""
+            names = [str(o) for o in opts]
+            if cur in names:
+                combo.setCurrentText(cur)
+            elif combo.count():
+                sock.value = combo.currentText()
+            combo.currentTextChanged.connect(
+                lambda t, s=sock: (setattr(s, "value", t),
+                                   s.node.update()))
+            return combo
         edit = QLineEdit()
         edit.setPlaceholderText("literal value…")
         edit.setText("" if sock.value is None else str(sock.value))
@@ -5703,6 +6072,14 @@ class MainWindow(QMainWindow):
         nid = parts[1] if len(parts) > 1 else ""
         payload = parts[2] if len(parts) > 2 else ""
 
+        # Commands that must run before any node lookup.
+        if cmd == "ask":
+            self._handle_ask(nid, payload)
+            return
+        if cmd == "media":
+            self._handle_media(nid, payload)
+            return
+
         # ---- global markers that don't belong to a node ---- #
         if cmd == "ask":
             try:
@@ -5803,6 +6180,99 @@ class MainWindow(QMainWindow):
             self._run_log.append("> %s%s" % (prompt, reply))
         except Exception:
             pass
+
+    def _handle_media(self, nid, payload):
+        try:
+            info = json.loads(payload)
+            kind = info.get("kind", "")
+            path = info.get("path", "")
+        except Exception:
+            return
+        if not path or not os.path.isfile(path):
+            return
+        if kind == "image":
+            self._show_image_dialog(nid, path)
+        elif kind in ("audio", "video"):
+            self._show_media_player(nid, path, kind)
+
+    def _show_image_dialog(self, nid, path):
+        from PyQt5.QtGui import QPixmap
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Image \u2014 %s" % nid)
+        dlg.setStyleSheet("QDialog{background:#202020;}")
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(8, 8, 8, 8)
+        pix = QPixmap(path)
+        lbl = QLabel()
+        if pix.width() > 900 or pix.height() > 640:
+            pix = pix.scaled(900, 640, Qt.KeepAspectRatio,
+                             Qt.SmoothTransformation)
+        lbl.setPixmap(pix)
+        lbl.setAlignment(Qt.AlignCenter)
+        v.addWidget(lbl, 1)
+        info = QLabel(os.path.basename(path))
+        info.setStyleSheet("color:#8A8A8A;font-size:11px;")
+        v.addWidget(info)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        btn = QPushButton("Close")
+        btn.clicked.connect(dlg.accept)
+        row.addWidget(btn)
+        v.addLayout(row)
+        dlg.resize(min(pix.width() + 32, 960),
+                   min(pix.height() + 96, 760))
+        if not hasattr(self, "_media_dialogs"):
+            self._media_dialogs = []
+        self._media_dialogs.append(dlg)
+        dlg.show()
+        dlg.raise_()
+
+    def _show_media_player(self, nid, path, kind):
+        try:
+            from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+            from PyQt5.QtMultimediaWidgets import QVideoWidget
+            from PyQt5.QtCore import QUrl
+        except Exception as ex:
+            self.report("QtMultimedia unavailable: %s" % ex,
+                        "warning", 4000)
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("%s \u2014 %s"
+                          % (kind.capitalize(), nid))
+        dlg.setStyleSheet("QDialog{background:#202020;}")
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(8, 8, 8, 8)
+        if kind == "video":
+            widget = QVideoWidget()
+            v.addWidget(widget, 1)
+            player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
+            player.setVideoOutput(widget)
+        else:
+            lbl = QLabel(os.path.basename(path))
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet("color:#DDD;font-size:14px;")
+            v.addWidget(lbl, 1)
+            player = QMediaPlayer()
+        player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
+        row = QHBoxLayout()
+        btn_play  = QPushButton("Play")
+        btn_pause = QPushButton("Pause")
+        btn_stop  = QPushButton("Stop")
+        row.addWidget(btn_play)
+        row.addWidget(btn_pause)
+        row.addWidget(btn_stop)
+        row.addStretch(1)
+        v.addLayout(row)
+        btn_play.clicked.connect(player.play)
+        btn_pause.clicked.connect(player.pause)
+        btn_stop.clicked.connect(player.stop)
+        player.play()
+        if not hasattr(self, "_media_dialogs"):
+            self._media_dialogs = []
+        self._media_dialogs.append((dlg, player))
+        dlg.resize(800, 600 if kind == "video" else 200)
+        dlg.show()
+        dlg.raise_()
 
     def _on_run_finished(self, code, err):
         self._run_thread = None
@@ -6208,6 +6678,34 @@ class MainWindow(QMainWindow):
                 _nid = n.metadata.get("id") or n.title
                 L.append("%s%s = _ask(%r, %s)"
                          % (pad, var, _nid, B.get("Prompt") or "''"))
+                return L, miss
+
+            if kind == "file_open":
+                _p = B.get("Path") or "'data.txt'"
+                _m = B.get("Mode") or "'r'"
+                L.append("%s%s = open(%s, %s)" % (pad, var, _p, _m))
+                return L, miss
+            if kind == "file_read":
+                _p = B.get("Path") or "'data.txt'"
+                L.append("%swith open(%s, 'r') as _f:" % (pad, _p))
+                L.append("%s    %s = _f.read()" % (pad, var))
+                return L, miss
+            if kind == "file_write":
+                _p = B.get("Path") or "'out.txt'"
+                _c = B.get("Content") or "''"
+                L.append("%swith open(%s, 'w') as _f:" % (pad, _p))
+                L.append("%s    _f.write(%s)" % (pad, _c))
+                L.append("%s%s = None" % (pad, var))
+                return L, miss
+            if kind in ("image_viewer", "audio_player", "video_player"):
+                _nid = n.metadata.get("id") or n.title
+                _k = {"image_viewer": "image",
+                      "audio_player": "audio",
+                      "video_player": "video"}[kind]
+                _src = B.get("Source") or "None"
+                L.append("%sruntime.media_show(%r, %r, %s)"
+                         % (pad, _nid, _k, _src))
+                L.append("%s%s = None" % (pad, var))
                 return L, miss
             if kind == "call_by_name":
                 name_lit = B.get("Name") or "'f'"
@@ -7955,10 +8453,17 @@ class API(QObject):
             n = entry[0]
             t = entry[1]
             default = None
+            options = None
             if len(entry) >= 3 and entry[2] in ("in", "out"):
                 desc = entry[3] if len(entry) > 3 else ""
                 if len(entry) > 4:
                     default = entry[4]
+                if len(entry) > 5:
+                    options = entry[5]
+            elif len(entry) == 5:
+                desc = entry[2]
+                default = entry[3]
+                options = entry[4]
             elif len(entry) == 4:
                 desc = entry[2]
                 default = entry[3]
@@ -7968,7 +8473,7 @@ class API(QObject):
                 desc = ""
             else:
                 raise ValueError(f"Bad socket entry: {entry!r}")
-            return (n, t, direction, desc, default)
+            return (n, t, direction, desc, default, options)
 
         if sections is None:
             sections = []
