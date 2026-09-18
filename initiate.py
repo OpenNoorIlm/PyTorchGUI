@@ -34,6 +34,10 @@ DATE = datetime.date.today().isoformat()
 README = '''\
 # PyTorchUI
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/OpenNoorIlm/PyTorchUI/main/docs/banner.png" alt="PyTorchUI" width="720">
+</p>
+
 A Blender-styled node editor for building and running PyTorch pipelines
 visually. Drag nodes onto a canvas, wire them together, and press **Run**
 to execute the generated Python.
