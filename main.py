@@ -101,7 +101,7 @@ except Exception as _e:
     print("[builtins] restore failed:", _e)
 
 
-SPECS = _load_specs('main.json', 'main.db')
+SPECS = _load_specs('data/main.json', 'data/main.db')
 for _s in SPECS:
     _s["on_exists"] = "keep"
 n_ok, n_bad = api.register.node.bulk(SPECS)

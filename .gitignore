@@ -146,3 +146,16 @@ $RECYCLE.BIN/
 /.cache/
 /.torch/
 /.huggingface/
+
+# ---------------------------------------------------------------- #
+#  Cleanup rules                                                    #
+# ---------------------------------------------------------------- #
+
+data/
+docs/banner.png
+.pytorchui/
+autosave.json
+generated.py
+*.bak_*
+**/__pycache__/
+*.pyc
