@@ -152,7 +152,6 @@ $RECYCLE.BIN/
 # ---------------------------------------------------------------- #
 
 data/
-docs/banner.png
 .pytorchui/
 autosave.json
 generated.py
