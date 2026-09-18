@@ -2108,7 +2108,24 @@ class Node(QGraphicsItem):
 
 
 def build_node_from_template(template):
-    n = Node(
+    _nc = template.get("node_class")
+    if not _nc:
+        _lc = template.get("_lifecycle") or {}
+        _nc = _lc.get("node_class")
+    if not _nc:
+        _cat = str(template.get("category", "")).split("/")[0]
+        _n = template.get("name", "")
+        if _cat == "pyautogui" and _n in ("click", "hotkey", "press"):
+            _nc = _n
+    if not _nc:
+        _k = template.get("kind")
+        if _k in ("file_open", "file_read", "file_write"):
+            _nc = _k
+    _classes = globals().get("_NODE_CLASSES", {})
+    _cls = _classes.get(_nc) if _nc else None
+    if _cls is None:
+        _cls = Node
+    n = _cls(
         template["name"],
         QColor(template.get("color", "#3B3B3B")),
         description=template.get("description", ""),
@@ -2136,6 +2153,10 @@ def build_node_from_template(template):
                 n.add_output(sock_name, sock_type, sock_desc,
                              sock_options)
     n.metadata["template"] = template["name"]
+    try:
+        n.after_template_built(template)
+    except Exception as _ex:
+        print("[nodeclass] after_template_built:", _ex)
     if template.get("flow", True):
         n.add_flow_sockets()
     return n
@@ -2691,10 +2712,32 @@ NODE_TEMPLATES.extend([
 _BUILTIN_TEMPLATES = _copy.deepcopy(NODE_TEMPLATES)
 
 
+# Name -> template dict, kept in sync with NODE_TEMPLATES.  Without
+# this, every register_node call scans the whole list and startup is
+# O(n^2).  This is the difference between a ~140 s boot and a ~1 s one.
+_TEMPLATE_BY_NAME = {}
+
+
+def _rebuild_template_index():
+    _TEMPLATE_BY_NAME.clear()
+    for _cat, _tpls in NODE_TEMPLATES:
+        for _t in _tpls:
+            _TEMPLATE_BY_NAME[_t["name"]] = _t
+
+
+_rebuild_template_index()
+
+
 def find_template(name):
+    tpl = _TEMPLATE_BY_NAME.get(name)
+    if tpl is not None:
+        return tpl
+    # Fallback for templates added before the index existed.  Also
+    # populates the index so the next call is O(1).
     for _, tpls in NODE_TEMPLATES:
         for tpl in tpls:
             if tpl["name"] == name:
+                _TEMPLATE_BY_NAME[name] = tpl
                 return tpl
     return None
 
@@ -2886,6 +2929,59 @@ class NodeScene(QGraphicsScene):
                 })
         return {"nodes": nodes_data, "edges": edges_data}
 
+    def _build_saved_node(self, nd):
+        """Rebuild one node, preserving its specialised class.
+
+        Loading through Node.from_dict() alone would downgrade every
+        pyautogui click / press / hotkey node to a plain Node, and lose
+        its header capture button.  Look up the template first; if it
+        carries a node_class tag, build through
+        build_node_from_template and then overwrite the default
+        sockets with the saved ones.
+        """
+        meta = nd.get("metadata") or {}
+        tpl_name = meta.get("template")
+        tpl = find_template(tpl_name) if tpl_name else None
+        if tpl is None:
+            return Node.from_dict(nd)
+
+        # Build via the factory.  build_node_from_template already runs
+        # after_template_built (which adds the capture button) and
+        # add_flow_sockets; wipe the socket lists below and re-add from
+        # saved data.  Attached widgets survive the wipe.
+        n = build_node_from_template(tpl)
+        for s in list(n.inputs) + list(n.outputs):
+            s.setParentItem(None)
+        n.inputs.clear()
+        n.outputs.clear()
+        n.sections = []
+        n._current_section = None
+
+        for sec in nd.get("sections", []):
+            n.add_section(sec.get("name", ""),
+                          sec.get("description", ""))
+            for entry in sec.get("inputs", []):
+                name = entry[0]
+                t    = entry[1]
+                desc = entry[2] if len(entry) > 2 else ""
+                val  = entry[3] if len(entry) > 3 else None
+                n.add_input(name, t, desc, val)
+            for entry in sec.get("outputs", []):
+                name = entry[0]
+                t    = entry[1]
+                desc = entry[2] if len(entry) > 2 else ""
+                n.add_output(name, t, desc)
+            n.sections[-1]["collapsed"] = sec.get("collapsed", False)
+
+        n.setPos(nd.get("x", 0.0), nd.get("y", 0.0))
+        n.metadata.update(meta)
+        n.set_title(nd.get("title", tpl_name))
+        n.set_node_color(nd.get("color", tpl.get("color", "#3B3B3B")))
+        n.set_description(nd.get("description", ""))
+        n.dynamic = bool(nd.get("dynamic", n.dynamic))
+        n.layout()
+        return n
+
     def load_from_dict(self, data):
         self.clear()
         self.temp_edge = None
@@ -2893,16 +2989,19 @@ class NodeScene(QGraphicsScene):
         self._tooltip = None
         created = []
         for nd in data.get("nodes", []):
-            n = Node.from_dict(nd)
-            self.addItem(n); created.append(n)
+            n = self._build_saved_node(nd)
+            self.addItem(n)
+            created.append(n)
         for ed in data.get("edges", []):
             try:
                 sn = created[ed["from_node"]]
                 dn = created[ed["to_node"]]
             except (IndexError, KeyError):
                 continue
-            src = next((s for s in sn.outputs if s.name == ed["from_socket"]), None)
-            dst = next((s for s in dn.inputs  if s.name == ed["to_socket"]), None)
+            src = next((s for s in sn.outputs
+                        if s.name == ed["from_socket"]), None)
+            dst = next((s for s in dn.inputs
+                        if s.name == ed["to_socket"]), None)
             if src is not None and dst is not None:
                 self.connect_sockets(src, dst)
         self.graph_changed.emit()
@@ -3079,10 +3178,8 @@ class NodeView(QGraphicsView):
         return self.current_scene_pos()
 
     def wheelEvent(self, event):
+        # Unlimited zoom.
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        cur = self.transform().m11()
-        if (cur < 0.25 and factor < 1) or (cur > 4.0 and factor > 1):
-            return
         self.scale(factor, factor)
         self._last_scene_pos = self.mapToScene(event.pos())
 
@@ -4474,7 +4571,7 @@ class MainWindow(QMainWindow):
         self._act(m, "Deselect All", "Alt+A",    lambda: self.scene.clearSelection())
 
         m = mb.addMenu("View")
-        self._act(m, "Frame All",   "Home",    self.view.frame_all)
+        self._act(m, "Home",        "Home",    self._go_home)
         self._act(m, "Zoom In",     "Ctrl+=",  lambda: self.view.scale(1.15, 1.15))
         self._act(m, "Zoom Out",    "Ctrl+-",  lambda: self.view.scale(1/1.15, 1/1.15))
         m.addSeparator()
@@ -4549,7 +4646,7 @@ class MainWindow(QMainWindow):
         btn("Duplicate", "Duplicate (Ctrl+D)",  self.view.duplicate_selected)
         btn("Delete",    "Delete (Del)",        self.view.delete_selected)
         tb.addSeparator()
-        btn("Frame",     "Frame All (Home)",    self.view.frame_all)
+        btn("Home",      "Home (reset zoom + frame all)", self._go_home)
         tb.addSeparator()
         btn("Generate",  "Write generated.py (Ctrl+G)", self._generate_code_to_file)
         btn("Run",       "Run generated.py (F5)",       self._run_generated_code)
@@ -4563,6 +4660,18 @@ class MainWindow(QMainWindow):
                           self._show_all_outputs)
 
     # ------------------------------------------------------------ status   #
+    def _go_home(self):
+        """Reset zoom and frame every node in the scene."""
+        try:
+            self.view.resetTransform()
+        except Exception:
+            pass
+        try:
+            self.view.frame_all()
+        except Exception:
+            pass
+        self.report("Home", "info", 1200)
+
     def _build_status_bar(self):
         sb = QStatusBar()
         self.setStatusBar(sb)
@@ -8071,12 +8180,14 @@ class _NodeRegistrar:
             for i, t in enumerate(tpls):
                 if t["name"] == name:
                     del tpls[i]
+                    _TEMPLATE_BY_NAME.pop(name, None)
                     self._api.window.library.refresh()
                     return True
         return False
 
     def clear(self):
         NODE_TEMPLATES.clear()
+        _TEMPLATE_BY_NAME.clear()
         try:
             _register_builtins(self._api)
             _register_roles(self._api)
@@ -8091,6 +8202,7 @@ class _NodeRegistrar:
 
     def builtin(self):
         NODE_TEMPLATES[:] = _copy.deepcopy(_BUILTIN_TEMPLATES)
+        _rebuild_template_index()
         self._api.window.library.refresh()
 
     def bulk(self, specs):
@@ -8644,23 +8756,16 @@ class API(QObject):
         if not name or not isinstance(name, str):
             raise ValueError("register_node needs a non-empty 'name'")
         _on_exists = lifecycle.pop("on_exists", "error")
-        _existing = None
-        for _, _tpls in NODE_TEMPLATES:
-            for _t in _tpls:
-                if _t["name"] == name:
-                    _existing = _t
-                    break
-            if _existing is not None:
-                break
+        _existing = _TEMPLATE_BY_NAME.get(name)
         if _existing is not None:
             if description == "default" or _on_exists == "keep":
                 return _existing
             if _on_exists == "replace":
                 for _cat, _tpls in NODE_TEMPLATES:
-                    for _i, _t in enumerate(_tpls):
-                        if _t["name"] == name:
-                            del _tpls[_i]
-                            break
+                    if _existing in _tpls:
+                        _tpls.remove(_existing)
+                        break
+                _TEMPLATE_BY_NAME.pop(name, None)
             else:
                 raise ValueError(f"Template '{name}' already registered.")
 
@@ -8750,6 +8855,7 @@ class API(QObject):
         else:
             NODE_TEMPLATES.append((category, [template]))
 
+        _TEMPLATE_BY_NAME[name] = template
         self._schedule_library_refresh()
         return template
 
@@ -9045,6 +9151,14 @@ def _install_nodehost():
         except ImportError:
             import NodeClasses as NC
         NC.install(Node, NodeSocket)
+        _classes = {}
+        for _tag, _factory in list(NC._NODE_CLASS_REGISTRY.items()):
+            try:
+                _classes[_tag] = _factory(Node)
+            except Exception as _fex:
+                print("[nodehost] factory %r failed: %s" % (_tag, _fex))
+        globals()["_NODE_CLASSES"] = _classes
+        print("[nodehost] live classes:", sorted(_classes.keys()))
     except Exception as _ex:
         import traceback
         print("[nodehost] install failed:")

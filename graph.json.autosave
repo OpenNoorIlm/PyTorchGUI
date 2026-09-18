@@ -1,0 +1,219 @@
+{
+  "nodes": [
+    {
+      "title": "Start",
+      "color": "#2e5c2e",
+      "x": -266.0,
+      "y": -50.0,
+      "description": "Entry point of the pipeline.",
+      "dynamic": false,
+      "metadata": {
+        "template": "Start"
+      },
+      "sections": [
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "Next",
+              "path",
+              "First node in the chain"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "End",
+      "color": "#5c2e2e",
+      "x": 399.0,
+      "y": -25.0,
+      "description": "Exit point of the pipeline.",
+      "dynamic": false,
+      "metadata": {
+        "template": "End"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Prev",
+              "path",
+              "Last node in the chain",
+              null
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "click",
+      "color": "#7a4a8a",
+      "x": 44.21189591078068,
+      "y": -161.43122676579924,
+      "description": "Performs pressing a mouse button down and then immediately releasing it. Returns ``None``.\n\nWhen no arguments are passed, the primary mouse button is clicked at the mouse cursor's current location.\n\nIf integers for ``x`` and ``y`` are passed, the click will happen at that XY coordinate. If ``x`` is a string, the\nstring is an image filename that PyAutoGUI will attempt to locate on the screen and click the center of. If ``x``\nis a sequence of two coordinates, those coordinates will be used for the XY coordinate to click on.\n\nThe ``clicks`` argument is an int of how many clicks to make, and defaults to ``1``.\n\nThe ``interval`` argument is an int or float of how many seconds to wait in between each click, if ``clicks`` is\ngreater than ``1``. It defaults to ``0.0`` for no pause in between clicks.\n\nThe ``button`` argument is one of the constants ``LEFT``, ``MIDDLE``, ``RIGHT``, ``PRIMARY``, or ``SECONDARY``.\nIt defaults to ``PRIMARY`` (which is the left mouse button, unless the operating system has been set for\nleft-handed users.)\n\nIf ``x`` and ``y`` are specified, and the click is not happening at the mouse cursor's current location, then\nthe ``duration`` argument is an int or float of how many seconds it should take to move the mouse to the XY\ncoordinates. It defaults to ``0`` for an instant move.\n\nIf ``x`` and ``y`` are specified and ``duration`` is not ``0``, the ``tween`` argument is a tweening function\nthat specifies the movement pattern of the mouse cursor as it moves to the XY coordinates. The default is a\nsimple linear tween. See the PyTweening module documentation for more details.\n\nThe ``pause`` parameter is deprecated. Call the ``pyautogui.sleep()`` function to implement a pause.\n\nRaises:\n  PyAutoGUIException: If button is not one of 'left', 'middle', 'right', 1, 2, 3",
+      "dynamic": false,
+      "metadata": {
+        "template": "click"
+      },
+      "sections": [
+        {
+          "name": "Inputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [
+            [
+              "x",
+              "any",
+              "Default: None",
+              "None"
+            ],
+            [
+              "y",
+              "any",
+              "Default: None",
+              "None"
+            ],
+            [
+              "clicks",
+              "any",
+              "Default: 1",
+              "1"
+            ],
+            [
+              "interval",
+              "any",
+              "Default: 0.0",
+              "0.0"
+            ],
+            [
+              "button",
+              "any",
+              "Default: 'primary'",
+              "'primary'"
+            ],
+            [
+              "duration",
+              "any",
+              "Default: 0.0",
+              "0.0"
+            ],
+            [
+              "tween",
+              "any",
+              "Default: <function linear at 0x71146874a710>",
+              null
+            ],
+            [
+              "logScreenshot",
+              "any",
+              "Default: None",
+              "None"
+            ],
+            [
+              "_pause",
+              "any",
+              "Default: True",
+              "True"
+            ]
+          ],
+          "outputs": []
+        },
+        {
+          "name": "Outputs",
+          "description": "",
+          "collapsed": false,
+          "inputs": [],
+          "outputs": [
+            [
+              "click",
+              "object",
+              "Result of pyautogui.click"
+            ]
+          ]
+        },
+        {
+          "name": "Flow",
+          "description": "Execution order (Path to Path)",
+          "collapsed": false,
+          "inputs": [
+            [
+              "Path In",
+              "path",
+              "Previous node in the flow",
+              null
+            ]
+          ],
+          "outputs": [
+            [
+              "Path Out",
+              "path",
+              "Next node in the flow"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from_node": 0,
+      "from_socket": "Path Out",
+      "to_node": 2,
+      "to_socket": "Path In"
+    },
+    {
+      "from_node": 2,
+      "from_socket": "Path Out",
+      "to_node": 1,
+      "to_socket": "Path In"
+    }
+  ]
+}

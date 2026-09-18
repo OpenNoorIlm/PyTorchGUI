@@ -475,7 +475,7 @@ def get_params(obj):
                         or " object at 0x" in r):
                     dv = None
                 elif isinstance(p.default, str):
-                    dv = p.default
+                    dv = repr(p.default)
                 else:
                     dv = r
         out.append((p.name, t, desc, dv))
@@ -1075,6 +1075,14 @@ def emit_json(specs, out_file, json_path,
 
 def emit_db(specs, out_file, db_path,
             torch_version, torch_path, packages):
+    """Emit a SQLite database, with an FTS5 index over name /
+    description / category.
+
+    The `node_search` table is created as an external-content FTS5
+    table (content='nodes'), so the text is not duplicated — only the
+    inverted index is stored, and its rowid matches nodes.id.  Triggers
+    keep it in sync with `nodes` on INSERT, DELETE, and UPDATE.
+    """
     date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if os.path.isfile(db_path):
@@ -1090,7 +1098,7 @@ def emit_db(specs, out_file, db_path,
         """)
         for k, v in (
             ("format", "pytorchui-nodes"),
-            ("version", "1"),
+            ("version", "2"),
             ("torch_version", torch_version),
             ("torch_path", torch_path),
             ("generated", date),
@@ -1116,6 +1124,53 @@ def emit_db(specs, out_file, db_path,
         con.execute("CREATE INDEX idx_nodes_category ON nodes(category)")
         con.execute("CREATE INDEX idx_nodes_full_path ON nodes(full_path)")
 
+        # ---- FTS5 virtual table ----
+        try:
+            con.execute("""
+                CREATE VIRTUAL TABLE node_search USING fts5(
+                    name,
+                    description,
+                    category,
+                    content='nodes',
+                    content_rowid='id',
+                    tokenize='unicode61 remove_diacritics 2'
+                )
+            """)
+            fts_ok = True
+        except sqlite3.OperationalError as ex:
+            print("  ! FTS5 unavailable (%s); writing plain table" % ex)
+            fts_ok = False
+
+        if fts_ok:
+            con.execute("""
+                CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN
+                    INSERT INTO node_search(
+                        rowid, name, description, category)
+                    VALUES (new.id, new.name, new.description,
+                            new.category);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER nodes_ad AFTER DELETE ON nodes BEGIN
+                    INSERT INTO node_search(
+                        node_search, rowid, name, description, category)
+                    VALUES ('delete', old.id, old.name,
+                            old.description, old.category);
+                END
+            """)
+            con.execute("""
+                CREATE TRIGGER nodes_au AFTER UPDATE ON nodes BEGIN
+                    INSERT INTO node_search(
+                        node_search, rowid, name, description, category)
+                    VALUES ('delete', old.id, old.name,
+                            old.description, old.category);
+                    INSERT INTO node_search(
+                        rowid, name, description, category)
+                    VALUES (new.id, new.name, new.description,
+                            new.category);
+                END
+            """)
+
         rows = []
         for s in specs:
             rows.append((
@@ -1135,6 +1190,16 @@ def emit_db(specs, out_file, db_path,
                 rows,
             )
         con.commit()
+
+        # Merge FTS5 b-tree segments into one for fast queries.
+        if fts_ok:
+            try:
+                con.execute(
+                    "INSERT INTO node_search(node_search) "
+                    "VALUES('optimize')")
+                con.commit()
+            except sqlite3.OperationalError:
+                pass
     finally:
         con.close()
 
