@@ -3,12 +3,12 @@
 # Data file:  main.db
 # Format:     db
 # Source:     torch 2.14.0+cpu (/home/bismillah/.local/lib/python3.10/site-packages/torch/__init__.py)
-# Date:       2026-09-17 15:54:00
-# Nodes:      9217
+# Date:       2026-09-18 13:44:43
+# Nodes:      22470
 #
 # The specs live in main.db, not in this file.  Regenerate the
 # data with `python create.py --db`.  This loader reads
-# whichever data file is present (json or db) and registers each spec.
+# whichever data file is present (json or db).
 
 import json
 import os
@@ -43,7 +43,6 @@ _print_env()
 
 
 def _load_specs(json_path, db_path):
-    """Read specs from whichever data file exists.  JSON wins."""
     if os.path.isfile(json_path):
         print("[loader] reading %s" % json_path)
         with open(json_path, "r", encoding="utf-8") as f:
@@ -53,12 +52,21 @@ def _load_specs(json_path, db_path):
         con = sqlite3.connect(db_path)
         try:
             cur = con.cursor()
-            cur.execute(
-                "SELECT name, color, category, description, "
-                "qualname, inputs, outputs, full_path FROM nodes")
+            cur.execute("PRAGMA table_info(nodes)")
+            cols = [r[1] for r in cur.fetchall()]
+            has_nc = "node_class" in cols
+            if has_nc:
+                sel = ("SELECT name, color, category, description, "
+                       "qualname, inputs, outputs, full_path, node_class "
+                       "FROM nodes")
+            else:
+                sel = ("SELECT name, color, category, description, "
+                       "qualname, inputs, outputs, full_path "
+                       "FROM nodes")
+            cur.execute(sel)
             out = []
             for row in cur.fetchall():
-                out.append({
+                spec = {
                     "name":        row[0],
                     "color":       row[1],
                     "category":    row[2],
@@ -67,7 +75,10 @@ def _load_specs(json_path, db_path):
                     "inputs":      json.loads(row[5]) if row[5] else [],
                     "outputs":     json.loads(row[6]) if row[6] else [],
                     "full_path":   row[7],
-                })
+                }
+                if has_nc and row[8]:
+                    spec["node_class"] = row[8]
+                out.append(spec)
             return out
         finally:
             con.close()

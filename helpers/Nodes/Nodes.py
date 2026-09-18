@@ -5894,17 +5894,49 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------ code + run    #
     def _generate_code_to_file(self):
+        import traceback as _tb
         path = "generated.py"
+
+        # 1. Run codegen entirely in memory.  If it raises, we do not
+        #    touch the existing file until we know what happened.
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("")
             code = self._generate_code()
+        except Exception as ex:
+            tb_text = _tb.format_exc()
+
+            # Print the traceback to the terminal that launched the editor.
+            print()
+            print("=" * 60)
+            print("[generate] FAILED")
+            print("=" * 60)
+            print(tb_text)
+            print("=" * 60)
+            print()
+
+            # Also write the traceback as comments into generated.py so
+            # `cat generated.py` explains itself.
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("# Generate FAILED\n")
+                    f.write("# " + str(ex) + "\n")
+                    f.write("#\n")
+                    for ln in tb_text.splitlines():
+                        f.write("# " + ln + "\n")
+            except Exception:
+                pass
+
+            self.report("Generate failed: %s" % ex, "error", 8000)
+            return
+
+        # 2. Codegen succeeded — write it out.
+        try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(code)
             n = code.count("\n")
             self.report("Wrote %s (%d lines)" % (path, n), "success", 3000)
         except Exception as ex:
-            self.report("Generate failed: %s" % ex, "error", 5000)
+            self.report("Write failed: %s" % ex, "error", 6000)
+
 
     def _node_by_id(self, node_id):
         for n in self.scene.items():
@@ -6735,9 +6767,10 @@ class MainWindow(QMainWindow):
                 # Start / End and anything else under the Flow category
                 # are graph anchors, not real calls.  Emit a plain None
                 # and skip import resolution entirely.
-                _cat = (n.metadata.get("category")
-                        or n.metadata.get("template") or "")
-                if str(_cat).strip() == "Flow" or n.title in ("Start", "End"):
+                _cat_str = (n.metadata.get("category")
+                            or n.metadata.get("template") or "")
+                if (str(_cat_str).strip() == "Flow"
+                        or n.title in ("Start", "End")):
                     L.append("%s%s = None" % (pad, var))
                     return L, miss
                 call_t = n.metadata.get("call") or tpl.get("call")
@@ -8998,6 +9031,26 @@ def main():
     win.show()
     sys.exit(app.exec_())
 
+
+
+
+# ============================================================== #
+#  Per-node widget host                                          #
+# ============================================================== #
+
+def _install_nodehost():
+    try:
+        try:
+            from helpers.Nodes import NodeClasses as NC
+        except ImportError:
+            import NodeClasses as NC
+        NC.install(Node, NodeSocket)
+    except Exception as _ex:
+        import traceback
+        print("[nodehost] install failed:")
+        traceback.print_exc()
+
+_install_nodehost()
 
 if __name__ == "__main__":
     main()

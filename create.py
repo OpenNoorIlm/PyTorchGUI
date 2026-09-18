@@ -7,11 +7,12 @@ Usage:
     python create.py                             # embed specs in main.py
     python create.py --json                      # write main.json + loader
     python create.py --db                        # write main.db + loader
-    python create.py --format json               # same as --json
-    python create.py --format db                 # same as --db
-    python create.py -l os subprocess --json     # add libs, output as JSON
-    python create.py --json --json-path nodes.json
-    python create.py --db --db-path nodes.db
+    python create.py -l pyautogui                # add pyautogui
+    python create.py -nt -l '[pyautogui,os]'     # skip torch
+    python create.py -nc                        # no caps: walk everything
+    python create.py -c 500                     # per-package cap 500
+    python create.py -cl torch=5000              # torch gets 5000
+    python create.py -cl torch=5000 -cl scipy=2000
 
 Notes
 -----
@@ -19,19 +20,19 @@ Notes
 * Global dedup by name — same class/function registered once.
 * Modules walked shallow-first, so torch.nn.Conv2d wins over the
   internal torch.nn.modules.conv.Conv2d.
-* torch is ALWAYS walked, whether or not it appears in --libraries.
-* Budget model: each explicitly-requested library gets its own cap.
-  --max-nodes sets the per-package cap.
-* Top-level modules whose members live in a C extension (io -> _io,
-  os -> posix, json -> _json, csv -> _csv, socket -> _socket, ...)
-  are collected in full: the ownership check is skipped at depth 0.
-* Deprecation warnings raised by walked modules are suppressed by
-  redirecting stderr during the walk.
+* torch is walked by default, unless --no-torch / -nt is passed.
+* Built-in EXTRA_ROOTS are skipped if the same module was already
+  walked via -l; nothing is registered twice.
+* Deprecation warnings and module-import stdout/stderr noise are
+  suppressed during the walk.
 * Every BaseException subclass is moved into a single "Exceptions"
-  category and carries a `qualname` so the codegen can emit valid
-  Python for it.
+  category and carries a `qualname`.
 * Enum-typed and object-typed parameter defaults are dropped, so the
-  generated file always parses.  (`AwqBackend.AUTO` and friends.)
+  generated file always parses.
+* Known PyAutoGUI nodes (click / press / hotkey) get a `node_class`
+  field, which the editor uses to pick a specialised Node subclass.
+* Both C-extension functions (math.sqrt, os.listdir) and Python
+  functions are collected; inspect.isroutine covers both.
 """
 
 import argparse
@@ -58,8 +59,8 @@ BASE_CATEGORY = {"torch": "Torch"}
 EXCEPTIONS_CATEGORY = "Exceptions"
 EXCEPTIONS_COLOR    = "#A03A3A"
 
-PER_PACKAGE_CAP  = 500
-BASE_PACKAGE_CAP = 2000
+# Default per-package cap (overridable with -c / --cap).
+PER_PACKAGE_CAP  = 2000
 EXTRA_ROOT_CAP   = 150
 
 EXTRA_ROOTS = [
@@ -104,10 +105,35 @@ JSON_FILE      = "main.json"
 DB_FILE        = "main.db"
 PROGRESS_EVERY = 100
 
+# Safety net when --no-cap is used.  Five hundred thousand nodes is
+# far more than anyone wants to browse; if the walk gets close to
+# this, something is wrong.  Override by editing this constant.
+HARD_SAFETY_CAP = 500_000
+
 COLOR_PALETTE = [
     "#4A6B8A", "#8A4A4A", "#4A8A6B", "#6B4A8A",
     "#8A7A4A", "#4A7A8A", "#7A4A8A", "#7A6B3A",
 ]
+
+
+# ============================================================== #
+#  Node-class overrides for known libraries                      #
+# ============================================================== #
+#
+# Maps (dotted_module, name) -> node_class tag.  The editor uses the
+# tag to instantiate a specialised Node subclass from
+# helpers/Nodes/NodeClasses.py instead of a plain Node, so the node
+# comes with its own widgets (capture buttons, etc.).
+
+_NODE_CLASS_MAP = {
+    ("pyautogui", "click"):  "click",
+    ("pyautogui", "press"):  "press",
+    ("pyautogui", "hotkey"): "hotkey",
+}
+
+
+def _node_class_for(mod_path, name):
+    return _NODE_CLASS_MAP.get((mod_path, name))
 
 
 # ============================================================== #
@@ -132,23 +158,71 @@ def _flatten_libraries(raw_lists):
     return out
 
 
+def _parse_cap_libs(raw_list):
+    """
+    Parse -cl / --cap-libs entries.  Accepts any of:
+
+        -cl torch=5000
+        -cl torch:5000
+        -cl 'torch=5000,transformers=3000'
+        -cl '{"torch": 5000, "transformers": 3000}'
+
+    Repeated flags are merged; later values win.
+    """
+    out = {}
+    for token in raw_list:
+        token = str(token).strip()
+        if not token:
+            continue
+        if token.startswith("{"):
+            try:
+                d = json.loads(token)
+            except Exception as ex:
+                print("  ! could not parse --cap-libs JSON: %s" % ex)
+                continue
+            for k, v in d.items():
+                try:
+                    out[str(k).strip()] = int(v)
+                except Exception:
+                    print("  ! bad cap value for %r: %r" % (k, v))
+            continue
+        for piece in token.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            sep = "=" if "=" in piece else (":" if ":" in piece else None)
+            if sep is None:
+                print("  ! --cap-libs entry needs LIB=N: %r" % piece)
+                continue
+            k, v = piece.split(sep, 1)
+            k = k.strip()
+            try:
+                out[k] = int(v.strip())
+            except Exception:
+                print("  ! bad cap number for %r: %r" % (k, v))
+    return out
+
+
 def _build_parser():
     p = argparse.ArgumentParser(
         prog="create.py",
         description=(
             "Auto-generate the node library from installed Python "
-            "packages.  torch is always walked.  Output can be a plain "
-            "Python file (default), a JSON data file, or a SQLite "
-            "database, in which case a small loader main.py is written."
+            "packages.  torch is walked by default.  Output can be a "
+            "plain Python file, a JSON data file, or a SQLite database "
+            "plus a small loader main.py."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
             "  create.py\n"
-            "  create.py -l os subprocess\n"
-            "  create.py --json\n"
-            "  create.py --db -l os\n"
-            "  create.py --format json --json-path nodes.json\n"
+            "  create.py -l pyautogui\n"
+            "  create.py -l pyautogui --json\n"
+            "  create.py -l pyautogui --db\n"
+            "  create.py -nt -l '[pyautogui,os,time]'\n"
+            "  create.py -nc -l '[torch,transformers]'\n"
+            "  create.py -c 500\n"
+            "  create.py -cl torch=5000 -cl transformers=8000\n"
         ),
     )
     p.add_argument(
@@ -159,13 +233,43 @@ def _build_parser():
         help="extra libraries to walk (in addition to torch).",
     )
     p.add_argument(
+        "-nt", "--no-torch",
+        dest="no_torch",
+        action="store_true",
+        help="skip walking torch.  Only -l libraries and the built-in "
+             "EXTRA_ROOTS are walked.  Also lets create.py run on "
+             "machines without torch installed.",
+    )
+    p.add_argument(
+        "-c", "--cap", "--max-nodes",
+        dest="cap",
+        type=int,
+        default=PER_PACKAGE_CAP,
+        metavar="N",
+        help="per-package cap on collected nodes (default: %(default)s).",
+    )
+    p.add_argument(
+        "-nc", "--no-cap",
+        dest="no_cap",
+        action="store_true",
+        help="no cap.  Walk every node in every requested library.  "
+             "Ignored for libraries that have an explicit entry in "
+             "--cap-libs.",
+    )
+    p.add_argument(
+        "-cl", "--cap-libs",
+        dest="cap_libs",
+        action="append", default=[],
+        metavar="SPEC",
+        help="per-library cap override: LIB=N, LIB:N, or a JSON string "
+             "'{\"LIB\": N}'.  May be repeated.",
+    )
+    p.add_argument(
         "--format", "-f",
         dest="fmt",
         choices=("py", "json", "db"),
         default=None,
-        help="output format.  py = embed specs in main.py (default).  "
-             "json = write main.json + loader.  db = write main.db + "
-             "loader.",
+        help="output format.  py = embed specs in main.py (default).",
     )
     p.add_argument(
         "--json",
@@ -201,14 +305,6 @@ def _build_parser():
         help="sqlite path when --db is used (default: %(default)s)",
     )
     p.add_argument(
-        "--max-nodes",
-        dest="max_nodes",
-        type=int,
-        default=BASE_PACKAGE_CAP,
-        metavar="N",
-        help="per-package cap on nodes (default: %(default)s)",
-    )
-    p.add_argument(
         "--max-depth",
         dest="max_depth",
         type=int,
@@ -224,7 +320,6 @@ def _build_parser():
 
 
 def _resolve_format(args):
-    """Precedence: --json / --db flags > --format > default 'py'."""
     if args.use_json and args.use_db:
         print("! --json and --db are mutually exclusive")
         sys.exit(2)
@@ -241,12 +336,13 @@ def _resolve_format(args):
 #  Package list                                                  #
 # ============================================================== #
 
-def build_packages(extra_libs):
+def build_packages(extra_libs, no_torch=False):
     seen = set()
     ordered = []
-    for name in BASE_LIBRARIES:
-        if name not in seen:
-            seen.add(name); ordered.append(name)
+    if not no_torch:
+        for name in BASE_LIBRARIES:
+            if name not in seen:
+                seen.add(name); ordered.append(name)
     for name in extra_libs:
         if not name or name in seen:
             continue
@@ -333,14 +429,12 @@ def get_params(obj):
     out = []
     for p in params:
         if p.kind == p.VAR_POSITIONAL:
-            # *args — represent as a list-typed input named "*<name>".
             out.append(("*" + p.name, "vector",
                         "Positional arguments as a list", "[]"))
             if len(out) >= MAX_INPUTS:
                 break
             continue
         if p.kind == p.VAR_KEYWORD:
-            # **kwargs — represent as a dict-typed input named "**<name>".
             out.append(("**" + p.name, "any",
                         "Keyword arguments as a dict", "{}"))
             if len(out) >= MAX_INPUTS:
@@ -430,10 +524,20 @@ def module_to_category(root_cat, dotted_name):
 
 
 def _safe_import(name):
+    """
+    Import a module with all warnings and stdout/stderr noise silenced.
+
+    Some libraries (scipy in particular) print debugging data straight
+    to stdout on import.  Redirecting stderr alone isn't enough, so we
+    capture both while the import runs.
+    """
+    devnull = io.StringIO()
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            return importlib.import_module(name)
+            with contextlib.redirect_stdout(devnull):
+                with contextlib.redirect_stderr(devnull):
+                    return importlib.import_module(name)
     except BaseException:
         return None
 
@@ -449,24 +553,25 @@ def discover_modules(root_cat, package_name, max_depth, quiet=False):
     if pkg_path is None:
         return results
     base_depth = package_name.count(".")
-    err_buf = io.StringIO()
+    devnull = io.StringIO()
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with contextlib.redirect_stderr(err_buf):
-                for info in pkgutil.walk_packages(
-                        pkg_path, package_name + "."):
-                    name = info.name
-                    leaf = name.rsplit(".", 1)[-1]
-                    if leaf.startswith("_"):
-                        continue
-                    if _skip_module(name):
-                        continue
-                    depth = name.count(".") - base_depth
-                    if depth > max_depth:
-                        continue
-                    results.append((module_to_category(root_cat, name),
-                                    name, depth))
+            with contextlib.redirect_stdout(devnull):
+                with contextlib.redirect_stderr(devnull):
+                    for info in pkgutil.walk_packages(
+                            pkg_path, package_name + "."):
+                        name = info.name
+                        leaf = name.rsplit(".", 1)[-1]
+                        if leaf.startswith("_"):
+                            continue
+                        if _skip_module(name):
+                            continue
+                        depth = name.count(".") - base_depth
+                        if depth > max_depth:
+                            continue
+                        results.append((module_to_category(root_cat, name),
+                                        name, depth))
     except BaseException as ex:
         if not quiet:
             print("  ! walk failed for %s: %s" % (package_name, ex))
@@ -501,7 +606,9 @@ def collect_from_module(cat, mod_path, seen_names, specs_out, limit):
             obj = getattr(mod, name)
         except BaseException:
             continue
-        if not (inspect.isclass(obj) or inspect.isfunction(obj)):
+        # isroutine covers Python functions, C functions, and methods.
+        # isclass covers classes and exceptions.
+        if not (inspect.isclass(obj) or inspect.isroutine(obj)):
             continue
         if not top_level:
             obj_mod = getattr(obj, "__module__", "") or ""
@@ -517,7 +624,8 @@ def collect_from_module(cat, mod_path, seen_names, specs_out, limit):
         else:
             spec_cat = cat
             qualname = None
-        specs_out.append({
+
+        spec = {
             "name":        name,
             "color":       color_for(spec_cat),
             "category":    spec_cat,
@@ -527,7 +635,13 @@ def collect_from_module(cat, mod_path, seen_names, specs_out, limit):
             "outputs":     [(name, "object",
                              "Result of %s.%s" % (mod_path, name))],
             "full_path":   "%s.%s" % (mod_path, name),
-        })
+        }
+
+        _nc = _node_class_for(mod_path, name)
+        if _nc:
+            spec["node_class"] = _nc
+
+        specs_out.append(spec)
         added += 1
     return added
 
@@ -550,22 +664,55 @@ def _walk_one_package(cat, pkg, seen_names, max_depth, cap, quiet=False):
     return pkg_specs
 
 
-def collect(packages, max_depth, max_nodes, quiet=False):
+def collect(packages, max_depth, default_cap, quiet=False,
+            cap_map=None, no_cap=False):
+    """
+    Walk every (category, module) in `packages`, then every entry in
+    EXTRA_ROOTS that hasn't already been walked.
+
+    cap resolution for a package `pkg`:
+        1. cap_map[pkg]    if present (from -cl / --cap-libs)
+        2. no_cap -> infinity
+        3. default_cap     otherwise
+    """
+    cap_map = cap_map or {}
+
     def say(*a):
         if not quiet:
             print(*a)
+
+    def cap_for(pkg):
+        if pkg in cap_map:
+            return cap_map[pkg]
+        if no_cap:
+            return HARD_SAFETY_CAP
+        return default_cap
+
     all_specs = []
     seen_names = set()
+    walked_modules = set()
+
     say("discovering modules ...")
     for cat, pkg in packages:
+        walked_modules.add(pkg)
+        cap = cap_for(pkg)
         pkg_specs = _walk_one_package(
-            cat, pkg, seen_names, max_depth, max_nodes, quiet)
+            cat, pkg, seen_names, max_depth, cap, quiet)
         all_specs.extend(pkg_specs)
-        say("    -> %s: %d nodes" % (pkg, len(pkg_specs)))
+        say("    -> %s: %d nodes%s"
+            % (pkg, len(pkg_specs),
+               "" if cap != HARD_SAFETY_CAP else " (no cap)"))
+
     for cat, mod_path in EXTRA_ROOTS:
+        if mod_path in walked_modules:
+            # already walked from -l; don't register the same objects
+            # under a second category.
+            continue
+        walked_modules.add(mod_path)
         pkg_specs = _walk_one_package(
             cat, mod_path, seen_names, max_depth, EXTRA_ROOT_CAP, quiet)
         all_specs.extend(pkg_specs)
+
     all_specs.sort(key=lambda s: (s["category"], s["name"].lower()))
     return all_specs
 
@@ -634,7 +781,6 @@ except Exception as _e:
 SPECS = [
 '''
 
-# Loader header, used for --json and --db
 HEADER_LOADER = '''\
 # Auto-generated loader by create.py — do not edit by hand.
 #
@@ -646,7 +792,7 @@ HEADER_LOADER = '''\
 #
 # The specs live in {data_file}, not in this file.  Regenerate the
 # data with `python create.py --{data_format}`.  This loader reads
-# whichever data file is present (json or db) and registers each spec.
+# whichever data file is present (json or db).
 
 import json
 import os
@@ -681,7 +827,6 @@ _print_env()
 
 
 def _load_specs(json_path, db_path):
-    """Read specs from whichever data file exists.  JSON wins."""
     if os.path.isfile(json_path):
         print("[loader] reading %s" % json_path)
         with open(json_path, "r", encoding="utf-8") as f:
@@ -691,12 +836,21 @@ def _load_specs(json_path, db_path):
         con = sqlite3.connect(db_path)
         try:
             cur = con.cursor()
-            cur.execute(
-                "SELECT name, color, category, description, "
-                "qualname, inputs, outputs, full_path FROM nodes")
+            cur.execute("PRAGMA table_info(nodes)")
+            cols = [r[1] for r in cur.fetchall()]
+            has_nc = "node_class" in cols
+            if has_nc:
+                sel = ("SELECT name, color, category, description, "
+                       "qualname, inputs, outputs, full_path, node_class "
+                       "FROM nodes")
+            else:
+                sel = ("SELECT name, color, category, description, "
+                       "qualname, inputs, outputs, full_path "
+                       "FROM nodes")
+            cur.execute(sel)
             out = []
             for row in cur.fetchall():
-                out.append({
+                spec = {
                     "name":        row[0],
                     "color":       row[1],
                     "category":    row[2],
@@ -705,7 +859,10 @@ def _load_specs(json_path, db_path):
                     "inputs":      json.loads(row[5]) if row[5] else [],
                     "outputs":     json.loads(row[6]) if row[6] else [],
                     "full_path":   row[7],
-                })
+                }
+                if has_nc and row[8]:
+                    spec["node_class"] = row[8]
+                out.append(spec)
             return out
         finally:
             con.close()
@@ -834,6 +991,9 @@ def emit_python(specs, out_file, torch_version, torch_path, packages):
             if spec.get("qualname"):
                 f.write('        "qualname":    %s,\n'
                         % py_str(spec["qualname"]))
+            if spec.get("node_class"):
+                f.write('        "node_class":  %s,\n'
+                        % py_str(spec["node_class"]))
             f.write('        "inputs": [\n')
             for (n, t, d, dv) in spec["inputs"]:
                 if dv is not None:
@@ -863,8 +1023,7 @@ def emit_python(specs, out_file, torch_version, torch_path, packages):
 # ============================================================== #
 
 def _spec_to_json(spec):
-    """Tuples are not JSON; convert them to lists."""
-    return {
+    d = {
         "name":        spec["name"],
         "color":       spec["color"],
         "category":    spec["category"],
@@ -874,12 +1033,14 @@ def _spec_to_json(spec):
         "outputs":     [list(t) for t in spec["outputs"]],
         "full_path":   spec["full_path"],
     }
+    if spec.get("node_class"):
+        d["node_class"] = spec["node_class"]
+    return d
 
 
 def emit_json(specs, out_file, json_path,
               torch_version, torch_path, packages):
     date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     payload = {
         "format":        "pytorchui-nodes",
         "version":       1,
@@ -945,6 +1106,7 @@ def emit_db(specs, out_file, db_path,
                 category TEXT,
                 description TEXT,
                 qualname TEXT,
+                node_class TEXT,
                 inputs TEXT,
                 outputs TEXT,
                 full_path TEXT,
@@ -954,19 +1116,23 @@ def emit_db(specs, out_file, db_path,
         con.execute("CREATE INDEX idx_nodes_category ON nodes(category)")
         con.execute("CREATE INDEX idx_nodes_full_path ON nodes(full_path)")
 
+        rows = []
         for s in specs:
-            con.execute(
+            rows.append((
+                s["name"], s["color"], s["category"],
+                s["description"], s.get("qualname"),
+                s.get("node_class"),
+                json.dumps([list(t) for t in s["inputs"]]),
+                json.dumps([list(t) for t in s["outputs"]]),
+                s["full_path"],
+            ))
+        if rows:
+            con.executemany(
                 "INSERT OR IGNORE INTO nodes "
                 "(name, color, category, description, qualname, "
-                " inputs, outputs, full_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    s["name"], s["color"], s["category"],
-                    s["description"], s.get("qualname"),
-                    json.dumps([list(t) for t in s["inputs"]]),
-                    json.dumps([list(t) for t in s["outputs"]]),
-                    s["full_path"],
-                ),
+                " node_class, inputs, outputs, full_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
             )
         con.commit()
     finally:
@@ -996,29 +1162,54 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     fmt = _resolve_format(args)
+    cap_map = _parse_cap_libs(args.cap_libs)
 
     extra_libs = _flatten_libraries(args.libraries)
-    packages = build_packages(extra_libs)
+    packages = build_packages(extra_libs, no_torch=args.no_torch)
+
+    if not packages:
+        print("! nothing to walk.  Use -l LIBRARY, or drop --no-torch.")
+        sys.exit(2)
 
     if not args.quiet:
         print("output format:", fmt)
-        print("roots to walk (torch is always first):")
+        if args.no_torch:
+            print("torch:         SKIPPED (--no-torch)")
+        if args.no_cap:
+            print("cap:           NONE (--no-cap)")
+        else:
+            print("cap:           %d per package" % args.cap)
+        if cap_map:
+            print("cap overrides:")
+            for k, v in sorted(cap_map.items()):
+                print("  %-20s  %d" % (k, v))
+        print("roots to walk:")
         for cat, name in packages:
             print("  %-20s  ->  %s" % (name, cat))
         print()
 
+    version = "n/a (not walked)"
+    path = "n/a"
     try:
         import torch
+        version = getattr(torch, "__version__", "unknown")
+        path = getattr(torch, "__file__", "?")
     except ImportError:
-        print("torch is not installed for this interpreter.")
-        sys.exit(1)
-
-    version = getattr(torch, "__version__", "unknown")
-    path    = getattr(torch, "__file__", "?")
+        if not args.no_torch:
+            print("torch is not installed for this interpreter.")
+            print("Either install it, or pass --no-torch / -nt to skip.")
+            sys.exit(1)
     if not args.quiet:
         print("torch %s at %s" % (version, path))
 
-    specs = collect(packages, args.max_depth, args.max_nodes, args.quiet)
+    specs = collect(
+        packages,
+        args.max_depth,
+        args.cap,
+        args.quiet,
+        cap_map=cap_map,
+        no_cap=args.no_cap,
+    )
     if not args.quiet:
         print("Collected %d nodes total" % len(specs))
         from collections import Counter
@@ -1026,8 +1217,6 @@ def main(argv=None):
         for cat, n in sorted(c.items()):
             print("  %-30s %d nodes" % (cat, n))
 
-    # Remove the old output(s) so a crash mid-write can't leave stale
-    # content behind.
     for p in (args.out_file, args.json_path, args.db_path):
         if os.path.isfile(p):
             try:
