@@ -774,20 +774,25 @@ def collect_from_module(cat, mod_path, seen_names, specs_out, limit,
                         deep_c=False):
     if len(specs_out) >= limit:
         return 0
+    if _DEBUG:
+        print("[debug] collect %-45s cat=%s" % (mod_path, cat))
     mod = _safe_import(mod_path)
     if mod is None:
+        if _DEBUG:
+            print("[debug]   import failed")
         return 0
 
     exc_only = mod_path in _EXCEPTIONS_ONLY_ROOTS
 
-    # Compiled extensions (.so / .pyd / .dylib) have no submodules;
-    # their public API lives entirely in the module namespace.  They
-    # also report __module__ inconsistently, so the __module__ root
-    # check below is unreliable for them.
     if _is_c_extension(mod_path):
-        return _collect_from_c_extension(
+        if _DEBUG:
+            print("[debug]   -> C-extension path")
+        n = _collect_from_c_extension(
             mod, mod_path, cat, seen_names, specs_out, limit,
             exc_only, deep=deep_c)
+        if _DEBUG:
+            print("[debug]   collected %d" % n)
+        return n
 
     top_level = "." not in mod_path
     root = mod_path.split(".")[0]
@@ -807,19 +812,43 @@ def collect_from_module(cat, mod_path, seen_names, specs_out, limit,
             continue
         if not (inspect.isclass(obj) or inspect.isroutine(obj)):
             continue
+
+        real_mod = getattr(obj, "__module__", "") or ""
+
         if not top_level:
-            obj_mod = getattr(obj, "__module__", "") or ""
-            if obj_mod and not any(obj_mod.startswith(r) for r in roots):
+            if real_mod and not any(real_mod.startswith(r)
+                                    for r in roots):
+                if _DEBUG:
+                    print("[debug]   drop %-30s __module__=%r"
+                          % (name, real_mod))
                 continue
+
+        # Route to the object's own module so a class found via a
+        # shallow re-export lands under its real home.  Prefix is
+        # taken from cat's first segment so the casing stays
+        # consistent with the walker.
+        spec_cat = cat
+        if (real_mod
+                and real_mod != mod_path
+                and not real_mod.startswith("sip")
+                and not real_mod.startswith("PyQt5.sip")
+                and "." in real_mod
+                and any(real_mod.startswith(r) for r in roots)):
+            spec_cat = module_to_category(cat.split("/")[0], real_mod)
+            if _DEBUG:
+                print("[debug]   route %-24s -> %s"
+                      % (name, spec_cat))
+
         is_exc = _is_exception_class(obj)
         if exc_only and not is_exc:
             continue
+
         seen_names.add(name)
+
         if is_exc:
             spec_cat = EXCEPTIONS_CATEGORY
             qualname = _exception_qualname(obj, name)
         else:
-            spec_cat = cat
             qualname = None
 
         spec = {
@@ -840,6 +869,11 @@ def collect_from_module(cat, mod_path, seen_names, specs_out, limit,
 
         specs_out.append(spec)
         added += 1
+        if _DEBUG:
+            print("[debug]     + %-30s (cat=%s)" % (name, spec_cat))
+
+    if _DEBUG:
+        print("[debug]   collected %d" % added)
     return added
 
 

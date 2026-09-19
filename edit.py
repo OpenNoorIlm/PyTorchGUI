@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 """
-route_by_module.py — categorise objects by their real __module__.
+force_route_patch.py — replace collect_from_module and VERIFY the write.
 
-Replaces collect_from_module with a version that, when a class or
-function is discovered in a module that is not its definition site,
-writes the row under the deeper module's category.
+Earlier attempts printed "syntax OK" but the routing line never made
+it into the file.  This script reads back what it wrote and searches
+for the routing line before declaring success.
 
-So torch.nn.Conv2d (discovered in torch.nn, defined in
-torch.nn.modules.conv) is registered as:
-
-    category  Torch/nn/modules/conv
-
-instead of
-
-    category  Torch/nn
-
-The old behaviour:  the shallow module ate every name and marked it
-seen, so the deep module found nothing left to add.  The new
-behaviour:  the shallow module still walks first, but the row lands
-where the class is actually defined.
+If verification fails, it restores from backup.
 
 Run:
     python3 edit.py
@@ -35,9 +23,6 @@ import sys
 
 PATH = "create.py"
 
-
-# The full replacement.  Kept as one triple-quoted string with a
-# plain r-prefix so backslashes in regexes are literal.
 
 NEW_COLLECT = r'''def collect_from_module(cat, mod_path, seen_names, specs_out, limit,
                         deep_c=False):
@@ -84,9 +69,6 @@ NEW_COLLECT = r'''def collect_from_module(cat, mod_path, seen_names, specs_out, 
 
         real_mod = getattr(obj, "__module__", "") or ""
 
-        # Keep only objects defined inside this package.  Objects
-        # whose real module is unrelated (a helper imported from
-        # somewhere else) are dropped.
         if not top_level:
             if real_mod and not any(real_mod.startswith(r)
                                     for r in roots):
@@ -95,10 +77,10 @@ NEW_COLLECT = r'''def collect_from_module(cat, mod_path, seen_names, specs_out, 
                           % (name, real_mod))
                 continue
 
-        # ---- the routing step ---- #
-        # If the object's real module is a deeper path inside the
-        # same package, categorise the node there instead of under
-        # the module we happened to find it in.
+        # Route to the object's own module so a class found via a
+        # shallow re-export lands under its real home.  Prefix is
+        # taken from cat's first segment so the casing stays
+        # consistent with the walker.
         spec_cat = cat
         if (real_mod
                 and real_mod != mod_path
@@ -106,7 +88,7 @@ NEW_COLLECT = r'''def collect_from_module(cat, mod_path, seen_names, specs_out, 
                 and not real_mod.startswith("PyQt5.sip")
                 and "." in real_mod
                 and any(real_mod.startswith(r) for r in roots)):
-            spec_cat = real_mod.replace(".", "/")
+            spec_cat = module_to_category(cat.split("/")[0], real_mod)
             if _DEBUG:
                 print("[debug]   route %-24s -> %s"
                       % (name, spec_cat))
@@ -150,97 +132,110 @@ NEW_COLLECT = r'''def collect_from_module(cat, mod_path, seen_names, specs_out, 
 '''
 
 
-def _function_range(src, name):
-    try:
-        tree = ast.parse(src)
-    except SyntaxError as e:
-        print("  ! create.py does not parse: %s" % e)
-        return None
+VERIFY_MARKERS = [
+    "module_to_category(cat.split(\"/\")[0], real_mod)",
+    "spec_cat = cat",
+]
+
+
+def _find_node(tree, name):
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
-            start = node.lineno - 1
-            if node.decorator_list:
-                start = node.decorator_list[0].lineno - 1
-            return start, node.end_lineno
+            return node
     return None
-
-
-def replace_function(src, name, new_src):
-    rng = _function_range(src, name)
-    if rng is None:
-        return src, False
-    start, end = rng
-    lines = src.split("\n")
-    new_lines = new_src.rstrip("\n").split("\n")
-    return "\n".join(lines[:start] + new_lines + lines[end:]), True
 
 
 def main():
     if not os.path.isfile(PATH):
-        print("create.py not found — run from the project root.")
+        print("create.py not found.")
         sys.exit(1)
 
-    print("Target:", PATH)
     with open(PATH, "r", encoding="utf-8") as f:
-        src = f.read()
+        original = f.read()
 
-    if "spec_cat = real_mod.replace" in src:
-        print("  [ok] routing already present in collect_from_module")
-        return
-
-    new_src, ok = replace_function(src, "collect_from_module", NEW_COLLECT)
-    print("  collect_from_module replaced:", ok)
-    if not ok:
-        print()
-        print("Function not found — paste create.py and retarget.")
+    tree = ast.parse(original)
+    cm = _find_node(tree, "collect_from_module")
+    if cm is None:
+        print("! collect_from_module not found")
         sys.exit(1)
 
-    # Verify the resulting file parses.
+    start = cm.lineno - 1
+    if cm.decorator_list:
+        start = cm.decorator_list[0].lineno - 1
+    end = cm.end_lineno
+
+    lines = original.split("\n")
+    new_lines = NEW_COLLECT.rstrip("\n").split("\n")
+    candidate = "\n".join(lines[:start] + new_lines + lines[end:])
+
+    # Parse the candidate before writing.
     try:
-        ast.parse(new_src)
+        ast.parse(candidate)
     except SyntaxError as e:
-        print("  ! new source does not parse: %s" % e)
+        print("! candidate does not parse:", e)
         sys.exit(1)
 
-    backup = PATH + ".bak_routing"
+    # Backup, write, then READ BACK.
+    backup = PATH + ".bak_force"
     shutil.copy(PATH, backup)
     print("  backup ->", backup)
 
     with open(PATH, "w", encoding="utf-8") as f:
-        f.write(new_src)
+        f.write(candidate)
+
+    with open(PATH, "r", encoding="utf-8") as f:
+        written = f.read()
+
+    # Verify the routing line actually landed.
+    missing = [m for m in VERIFY_MARKERS if m not in written]
+    if missing:
+        print("! VERIFY FAILED — restore from backup")
+        for m in missing:
+            print("    missing:", m)
+        shutil.copy(backup, PATH)
+        sys.exit(1)
+
+    print("  write verified: routing line is present in collect_from_module")
+
+    # Re-parse and compile.
+    try:
+        ast.parse(written)
+    except SyntaxError as e:
+        print("! syntax error after write:", e)
+        shutil.copy(backup, PATH)
+        sys.exit(1)
 
     try:
         py_compile.compile(PATH, doraise=True)
         print("  syntax OK")
     except py_compile.PyCompileError as e:
         shutil.copy(backup, PATH)
-        print("  ! syntax error — restored")
+        print("! compile error — restored")
         print(e)
         sys.exit(1)
 
+    # Show the actual routing lines, so we can see them.
+    tree2 = ast.parse(written)
+    cm2 = _find_node(tree2, "collect_from_module")
+    print()
+    print("Lines in the new collect_from_module mentioning routing:")
+    body = written.split("\n")[cm2.lineno - 1:cm2.end_lineno]
+    for i, line in enumerate(body, cm2.lineno):
+        if "module_to_category" in line or "spec_cat = cat" in line \
+                or "spec_cat = real_mod" in line:
+            print("  %5d  %s" % (i, line))
+
     print()
     print("=" * 62)
-    print("Rebuild from scratch:")
-    print("=" * 62)
-    print()
+    print("Rebuild:")
     print("    rm main.db")
     print("    bash build.sh")
     print()
-    print("The rm is required — append-only would keep the existing")
-    print("rows under their old categories.")
-    print()
-    print("After the build, verify with:")
-    print()
-    print("    python3 -c \"import sqlite3; c=sqlite3.connect('main.db');\\")
-    print("      [print('%-46s %d' % r) for r in c.execute(\\")
-    print("      'SELECT category, COUNT(*) FROM nodes \\")
-    print("       WHERE category LIKE \\\"Torch/nn%\\\" \\")
-    print("       GROUP BY category ORDER BY 2 DESC LIMIT 12')]\"")
-    print()
-    print("Expected: Torch/nn shrinks to a handful of torch-specific")
-    print("helpers (ModuleList, Sequential, etc. defined in __init__),")
-    print("and Torch/nn/modules/conv, .../linear, .../activation each")
-    print("get their real counts.")
+    print("Verify:")
+    print("    python3 -c \"import sqlite3; c=sqlite3.connect('main.db');")
+    print("      print('lowercase torch/:', c.execute(")
+    print("        \\\"SELECT COUNT(*) FROM nodes WHERE category LIKE 'torch/%'\\\"")
+    print("        ).fetchone()[0])\"")
 
 
 if __name__ == "__main__":
