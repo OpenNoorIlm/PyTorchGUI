@@ -24,6 +24,10 @@ import os
 import re
 import sys
 import json
+import glob
+import shutil
+import struct
+import subprocess
 import copy as _copy
 import weakref
 
@@ -2762,6 +2766,61 @@ NODE_TEMPLATES.extend([
     ]),
 ])
 
+
+# ---------------------------------------------------------------- #
+#  Preview category                                                 #
+# ---------------------------------------------------------------- #
+#
+# These are separate from the Built-ins/Media trio, which lives in
+# ROLES and is registered by _register_roles.  The names here are
+# prefixed with "Preview" so they do not collide with the existing
+# Image Viewer / Audio Player / Video Player nodes.
+
+NODE_TEMPLATES.extend([
+    ("Preview", [
+        {"name": "Preview Image",
+         "color": "#8A7A4A",
+         "kind": "image_viewer",
+         "description":
+             "**Show an image while the pipeline runs.**\n\n"
+             "Accepts:\n"
+             "- a filesystem path (str)\n"
+             "- a PIL image (anything with .save and .size)\n"
+             "- a torch Tensor of shape (N,C,H,W), (C,H,W), or (H,W)\n"
+             "  with C in {1, 3, 4}.  Values are normalised to [0, 1].",
+         "inputs": [("Source", "any", "Path, PIL image, or tensor", "None")],
+         "outputs": []},
+
+        {"name": "Preview Audio",
+         "color": "#8A7A4A",
+         "kind": "audio_player",
+         "description":
+             "**Play an audio file while the pipeline runs.**\n\n"
+             "Accepts a filesystem path to .wav / .mp3 / .ogg.",
+         "inputs": [("Source", "any", "Path to an audio file", "None")],
+         "outputs": []},
+
+        {"name": "Preview Video",
+         "color": "#8A7A4A",
+         "kind": "video_player",
+         "description":
+             "**Play a video file while the pipeline runs.**\n\n"
+             "Accepts a filesystem path to .mp4 / .mkv / .webm.",
+         "inputs": [("Source", "any", "Path to a video file", "None")],
+         "outputs": []},
+
+        {"name": "Preview Folder",
+         "color": "#7A6B4A",
+         "kind": "image_viewer",
+         "description":
+             "**Open a folder of images as a grid.**\n\n"
+             "Experimental.  Currently shows only the first image; "
+             "the grid view is a planned upgrade.",
+         "inputs": [("Source", "string", "Folder path", "'images/'")],
+         "outputs": []},
+    ]),
+])
+
 _BUILTIN_TEMPLATES = _copy.deepcopy(NODE_TEMPLATES)
 
 
@@ -4738,7 +4797,7 @@ class MainWindow(QMainWindow):
     # ---- Convert dialog ---- #
 
     def _open_convert_dialog_menu(self):
-        python = _output_dir("python", "") or sys.executable
+        python = sys.executable
         default_out = _output_dir("db_output", os.getcwd())
         self._open_convert_dialog(python, "", default_out)
 
@@ -9359,7 +9418,15 @@ def _scan_python_folder(folder):
                                 "venv", "env", "build", "dist",
                                 ".tox", "node_modules")]
         for f in files:
+            # Convert only touches .py source files.  Everything
+            # else in the folder — .json, .yaml, .md, images, the
+            # compiled __pycache__ — is ignored.  The three checks
+            # below make that explicit and cheap.
             if not f.endswith(".py"):
+                continue
+            if f.startswith("."):
+                continue
+            if f.endswith(".pyc") or f.endswith(".pyo"):
                 continue
             path = os.path.join(dirpath, f)
             try:
@@ -9512,12 +9579,138 @@ class ConvertDialog(QDialog):
             self._scan()
 
     def _pick_python(self):
-        from PyQt5.QtWidgets import QFileDialog
-        start = os.path.dirname(self.edit_python.text()) or "/usr/bin"
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Choose Python interpreter", start, "All Files (*)")
-        if path:
-            self.edit_python.setText(path)
+        """Pick from a list of every interpreter found on the box.
+
+        No file browser.  Interpreters are located with shutil.which
+        and by probing a handful of well-known install locations.
+        Each entry shows the interpreter path and its version, so
+        you can tell a 3.10 from a 3.12 at a glance.
+        """
+        import glob
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QListWidget,
+            QListWidgetItem, QPushButton, QLineEdit)
+        import subprocess
+
+        seen = set()
+        found = []
+
+        def probe(path):
+            if not path:
+                return
+            real = os.path.realpath(path)
+            if real in seen:
+                return
+            seen.add(real)
+            try:
+                out = subprocess.check_output(
+                    [path, "-c",
+                     "import sys; print('.'.join(map(str,"
+                     " sys.version_info[:3])))"],
+                    stderr=subprocess.DEVNULL, timeout=4).decode().strip()
+            except Exception:
+                return
+            try:
+                has_qt = subprocess.run(
+                    [path, "-c", "import PyQt5"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=4).returncode == 0
+            except Exception:
+                has_qt = False
+            found.append((path, out, has_qt))
+
+        # PATH entries
+        for name in ("python", "python3", "python3.9", "python3.10",
+                     "python3.11", "python3.12", "python3.13"):
+            probe(shutil.which(name))
+        # Common install locations
+        for pat in (
+                "/usr/bin/python3*",
+                "/usr/local/bin/python3*",
+                "/opt/**/bin/python3*",
+                os.path.expanduser("~/.local/bin/python*"),
+                os.path.expanduser("~/.venv*/bin/python*"),
+                os.path.expanduser("~/venv*/bin/python*")):
+            for p in sorted(glob.glob(pat, recursive=True)):
+                if os.path.isfile(p) and os.access(p, os.X_OK):
+                    probe(p)
+
+        if not found:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Choose Python",
+                                "No Python interpreters found.")
+            return
+
+        # --- build the picker --- #
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Choose Python interpreter")
+        dlg.setModal(True)
+        dlg.resize(560, 380)
+        dlg.setStyleSheet(
+            "QDialog{background:#252525;color:#DDD;}"
+            "QListWidget{background:#1E1E1E;color:#DDD;"
+            " border:1px solid #333;padding:4px;}"
+            "QListWidget::item{padding:5px 8px;}"
+            "QListWidget::item:selected{background:#E08C4A;color:#1A1A1A;}"
+            "QLineEdit{background:#1E1E1E;color:#DDD;"
+            " border:1px solid #333;padding:5px 8px;}"
+            "QPushButton{background:#3C3C3C;border:1px solid #555;"
+            " color:#EEE;padding:5px 14px;border-radius:3px;}"
+            "QPushButton:hover{background:#4A4A4A;}")
+
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+        v.addWidget(QLabel(
+            "Pick the Python the editor should use for Convert."))
+
+        search = QLineEdit()
+        search.setPlaceholderText("Filter…")
+        v.addWidget(search)
+
+        lst = QListWidget()
+        current = self.edit_python.text().strip()
+        selected_row = 0
+        for i, (path, ver, has_qt) in enumerate(found):
+            tag = "PyQt5 OK" if has_qt else "        "
+            text = "%s   %-8s   %s" % (tag, ver, path)
+            it = QListWidgetItem(text)
+            it.setData(Qt.UserRole, path)
+            lst.addItem(it)
+            if path == current:
+                selected_row = i
+        lst.setCurrentRow(selected_row)
+        v.addWidget(lst, 1)
+
+        def _filter(t):
+            t = (t or "").strip().lower()
+            for i in range(lst.count()):
+                it = lst.item(i)
+                it.setHidden(bool(t) and t not in it.text().lower())
+        search.textChanged.connect(_filter)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b_cancel = QPushButton("Cancel")
+        b_ok = QPushButton("OK")
+        b_ok.setDefault(True)
+        row.addWidget(b_cancel)
+        row.addWidget(b_ok)
+        v.addLayout(row)
+
+        b_cancel.clicked.connect(dlg.reject)
+
+        def _accept():
+            it = lst.currentItem()
+            if it is None:
+                return
+            self.edit_python.setText(it.data(Qt.UserRole))
+            dlg.accept()
+        b_ok.clicked.connect(_accept)
+        lst.itemDoubleClicked.connect(lambda _it: _accept())
+
+        dlg.exec_()
 
     def _pick_output(self):
         from PyQt5.QtWidgets import QFileDialog

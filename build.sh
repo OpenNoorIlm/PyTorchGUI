@@ -1,1 +1,1 @@
-python create.py -l [os,io,os.path,math,random,json,pathlib,shutil,tempfile,time,datetime,sqlite3,transformers,torchaudio,torchvision,matplotlib,numpy,scipy,pyautogui,tensorflow,pyperclip,httpx] --db -nc
+python create.py -l [os,io,os.path,math,random,json,pathlib,shutil,tempfile,time,datetime,sqlite3,transformers,torchaudio,torchvision,matplotlib,numpy,scipy,pyautogui,tensorflow,pyperclip,httpx,PyQt5,bs4,requests] --db -nc --deep-c

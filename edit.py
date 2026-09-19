@@ -1,283 +1,219 @@
 #!/usr/bin/env python3
 """
-add_loader_only.py — add a --loader-only flag to create.py.
+fix_qts_aggregator.py — route C-extension objects to their real home.
 
-Problem:
-    `python create.py --db` walks every package (torch + libs) and
-    takes ~5 minutes.  If you only need to regenerate main.py — the
-    loader stub — you should not have to pay that cost.
+PyQt5.Qt re-exports the entire Qt API from QtCore, QtGui, QtWidgets,
+etc.  Because it is walked first (alphabetically), it steals every
+name and marks them seen, so the real modules find nothing to add.
 
-Solution:
-    --loader-only  reads metadata from the existing main.db (or
-    main.json), skips the walk entirely, and re-emits main.py from
-    the HEADER_LOADER template.  Runs in under a second.
-
-Usage:
-    python create.py --db --loader-only
-    python create.py --json --loader-only
-
-Idempotent.  Backs up create.py as create.py.bak_loadonly.
+Fix: inside _collect_from_c_extension, look at obj.__module__.  If it
+points to a specific PyQt5.* submodule, use that for the category
+instead of the walker's assignment.  So a QObject found via PyQt5.Qt
+still ends up under PyQt5/QtCore.
 
 Run:
     python3 edit.py
-    python create.py --db --loader-only
+    rm main.db
+    bash build.sh
 """
 
+import ast
 import os
-import re
 import shutil
 import py_compile
 import sys
 
 
-# ---- 1. add the helper functions just before def main(argv=None): ---- #
+PATH = "create.py"
 
-HELPERS = '''\
-def _read_db_metadata(path):
-    """Return the metadata table from a PyTorchUI db as a dict.
 
-    Empty dict if the file is missing or malformed — the caller
-    falls back to defaults.
+NEW_COLLECT_CEXT = '''\
+def _collect_from_c_extension(mod, mod_path, cat, seen_names,
+                              specs_out, limit, exc_only, deep=False):
+    """Enumerate classes and functions from a compiled extension.
+
+    Re-exports are a real problem: PyQt5.Qt contains the whole Qt
+    API copied from QtCore, QtGui, etc.  We route each object to the
+    category named by its own __module__ when that points to a
+    specific PyQt5.* submodule, so QObject lands under PyQt5/QtCore
+    even when discovered via PyQt5.Qt.
     """
-    if not os.path.isfile(path):
-        return {}
+    added = 0
     try:
-        con = sqlite3.connect(path)
-        try:
-            rows = con.execute(
-                "SELECT key, value FROM metadata").fetchall()
-        finally:
-            con.close()
-        return {str(k): str(v) for k, v in rows}
+        members = list(vars(mod).items())
     except Exception:
-        return {}
+        members = []
 
+    for name, obj in members:
+        if len(specs_out) >= limit:
+            break
+        if name.startswith("_"):
+            continue
+        if name in seen_names:
+            continue
+        if not (inspect.isclass(obj) or inspect.isroutine(obj)):
+            continue
 
-def _read_json_metadata(path):
-    """Return the top-level metadata from a PyTorchUI json dump."""
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        return {
-            "torch_version": str(d.get("torch_version", "n/a")),
-            "torch_path":    str(d.get("torch_path", "n/a")),
-            "node_count":    str(d.get("node_count", 0)),
-        }
-    except Exception:
-        return {}
+        is_exc = _is_exception_class(obj)
+        if exc_only and not is_exc:
+            continue
 
+        # ---- category routing ---- #
+        # Prefer the object's own __module__ when it points to a
+        # specific module inside the same package.  Ignore SIP
+        # placeholders and the empty string.
+        spec_cat = cat
+        real_mod = getattr(obj, "__module__", None) or ""
+        if (real_mod
+                and real_mod != mod_path
+                and "." in real_mod
+                and not real_mod.startswith("sip")
+                and not real_mod.startswith("PyQt5.sip")):
+            spec_cat = real_mod.replace(".", "/")
 
-def emit_loader_only(out_file, data_file, data_format,
-                     version, path, node_count,
-                     json_path=None, db_path=None):
-    """Emit just the loader main.py, no walking, no package imports.
+        seen_names.add(name)
 
-    For format=db   the loader tries main.json first, then main.db.
-    For format=json the loader tries the given json path, then the
-                    default db path.
-    """
-    date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # The loader template already substitutes both fallback paths.
-    # For db output, we leave the json fallback at its default.
-    _json = json_path if json_path is not None else JSON_FILE
-    _db   = db_path if db_path is not None else DB_FILE
-
-    with open(out_file, "w", encoding="utf-8") as f:
-        header = (HEADER_LOADER
-                  .replace("{json_path!r}", repr(_json))
-                  .replace("{db_path!r}",   repr(_db))
-                  .replace("{data_file}",   data_file)
-                  .replace("{data_format}", data_format)
-                  .replace("{version}",     version)
-                  .replace("{torch_path}",  path)
-                  .replace("{date}",        date)
-                  .replace("{node_count}",  str(node_count)))
-        f.write(header)
-        f.write(FOOTER)
-    return out_file
-
-
-'''
-
-
-def patch_helpers(src):
-    if "_read_db_metadata" in src:
-        return src, "already present"
-    anchor = "def main(argv=None):\n"
-    if anchor not in src:
-        return src, "anchor: 'def main(argv=None):' not found"
-    return src.replace(anchor, HELPERS + anchor, 1), "inserted helpers"
-
-
-# ---- 2. add --loader-only to the argument parser ---- #
-
-OLD_ARG_TAIL = '''\
-    p.add_argument(
-        "--quiet", action="store_true",
-        help="suppress progress output",
-    )
-    return p
-'''
-
-NEW_ARG_TAIL = '''\
-    p.add_argument(
-        "--quiet", action="store_true",
-        help="suppress progress output",
-    )
-    p.add_argument(
-        "--loader-only", dest="loader_only", action="store_true",
-        help="skip the walk; only re-emit the loader main.py using "
-             "metadata already present in main.db / main.json.  Fast.",
-    )
-    return p
-'''
-
-
-def patch_parser(src):
-    if "--loader-only" in src:
-        return src, "already present"
-    if OLD_ARG_TAIL not in src:
-        return src, "anchor: parser tail not found"
-    return src.replace(OLD_ARG_TAIL, NEW_ARG_TAIL, 1), "inserted flag"
-
-
-# ---- 3. handle the flag early in main() ---- #
-
-OLD_MAIN_HEAD = '''\
-def main(argv=None):
-    warnings.filterwarnings("ignore")
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    fmt = _resolve_format(args)
-    cap_map = _parse_cap_libs(args.cap_libs)
-'''
-
-NEW_MAIN_HEAD = '''\
-def main(argv=None):
-    warnings.filterwarnings("ignore")
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    fmt = _resolve_format(args)
-
-    # ---- fast path: emit only the loader, no walk ---- #
-    if getattr(args, "loader_only", False):
-        if fmt == "py":
-            print("! --loader-only requires --db or --json")
-            sys.exit(2)
-
-        # Read metadata from whichever data file we already have.
-        meta = {}
-        if fmt == "db":
-            meta = _read_db_metadata(args.db_path)
-            if not meta:
-                meta = _read_json_metadata(args.json_path)
-            data_file = args.db_path
-            json_path = args.json_path
-            db_path   = args.db_path
+        if is_exc:
+            spec_cat = EXCEPTIONS_CATEGORY
+            qualname = _exception_qualname(obj, name)
         else:
-            meta = _read_json_metadata(args.json_path)
-            if not meta:
-                meta = _read_db_metadata(args.db_path)
-            data_file = args.json_path
-            json_path = args.json_path
-            db_path   = args.db_path
+            qualname = None
 
-        if not meta:
-            print("! no existing %s found; run a full build first"
-                  % (data_file,))
-            sys.exit(1)
+        spec = {
+            "name":        name,
+            "color":       color_for(spec_cat),
+            "category":    spec_cat,
+            "description": get_doc(obj),
+            "qualname":    qualname,
+            "inputs":      get_params(obj),
+            "outputs":     [(name, "object",
+                             "Result of %s.%s" % (mod_path, name))],
+            "full_path":   "%s.%s" % (mod_path, name),
+        }
 
-        version    = meta.get("torch_version", "n/a")
-        path       = meta.get("torch_path",    "n/a")
-        node_count = meta.get("node_count",    "0")
+        _nc = _node_class_for(mod_path, name)
+        if _nc:
+            spec["node_class"] = _nc
 
-        emit_loader_only(
-            out_file=args.out_file,
-            data_file=data_file,
-            data_format=fmt,
-            version=version,
-            path=path,
-            node_count=node_count,
-            json_path=json_path,
-            db_path=db_path,
-        )
+        specs_out.append(spec)
+        added += 1
 
-        if not args.quiet:
-            print("output format:", fmt, "(loader-only)")
-            print("data file:    ", data_file)
-            print("nodes:        ", node_count)
-            print("Wrote", args.out_file)
-        return
+        if deep and inspect.isclass(obj) and len(specs_out) < limit:
+            try:
+                inner = list(vars(obj).items())
+            except Exception:
+                inner = []
+            for inner_name, inner_obj in inner:
+                if inner_name.startswith("_"):
+                    continue
+                full_inner = "%s.%s" % (name, inner_name)
+                if full_inner in seen_names:
+                    continue
+                if not (inspect.isclass(inner_obj)
+                        or inspect.isroutine(inner_obj)):
+                    continue
+                seen_names.add(full_inner)
+                sub = {
+                    "name":        full_inner,
+                    "color":       color_for(spec_cat),
+                    "category":    spec_cat,
+                    "description": get_doc(inner_obj),
+                    "qualname":    ("%s.%s" % (qualname, inner_name))
+                                   if qualname else None,
+                    "inputs":      get_params(inner_obj),
+                    "outputs":     [(inner_name, "object",
+                                     "Nested attribute of %s.%s"
+                                     % (mod_path, name))],
+                    "full_path":   "%s.%s.%s" % (mod_path, name, inner_name),
+                }
+                specs_out.append(sub)
+                added += 1
 
-    cap_map = _parse_cap_libs(args.cap_libs)
+    return added
 '''
 
 
-def patch_main_head(src):
-    if 'getattr(args, "loader_only", False)' in src:
-        return src, "already present"
-    if OLD_MAIN_HEAD not in src:
-        return src, "anchor: main() head not found"
-    return src.replace(OLD_MAIN_HEAD, NEW_MAIN_HEAD, 1), "patched"
+def _function_range(src, name):
+    tree = ast.parse(src)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            start = node.lineno - 1
+            if node.decorator_list:
+                start = node.decorator_list[0].lineno - 1
+            return start, node.end_lineno
+    return None
 
 
-# ---- driver ---- #
+def replace_function(src, name, new_src):
+    rng = _function_range(src, name)
+    if rng is None:
+        return src, False
+    start, end = rng
+    lines = src.split("\n")
+    new_lines = new_src.rstrip("\n").split("\n")
+    return "\n".join(lines[:start] + new_lines + lines[end:]), True
+
 
 def main():
-    path = "create.py"
-    if not os.path.isfile(path):
+    if not os.path.isfile(PATH):
         print("create.py not found — run from the project root.")
         sys.exit(1)
 
-    with open(path, "r", encoding="utf-8") as f:
+    print("Target:", PATH)
+    with open(PATH, "r", encoding="utf-8") as f:
         src = f.read()
 
-    original = src
-    for label, fn in (
-        ("helpers",     patch_helpers),
-        ("parser flag", patch_parser),
-        ("main() head", patch_main_head),
-    ):
-        src, status = fn(src)
-        print("  %-12s %s" % (label, status))
-        if "not found" in status:
-            print()
-            print("Anchor missing.  Nothing written.")
-            sys.exit(1)
-
-    if src == original:
-        print()
-        print("Nothing to do — create.py already up to date.")
+    if "__module__ routing" in src or (
+            'real_mod = getattr(obj, "__module__", None) or ""' in src
+            and "spec_cat = real_mod.replace" in src):
+        print("  [ok] already patched")
         return
 
-    backup = path + ".bak_loadonly"
-    shutil.copy(path, backup)
-    print("  backup -> %s" % backup)
+    src, ok = replace_function(
+        src, "_collect_from_c_extension", NEW_COLLECT_CEXT)
+    print("  _collect_from_c_extension replaced:", ok)
+    if not ok:
+        print()
+        print("Function not found — paste create.py.")
+        sys.exit(1)
 
-    with open(path, "w", encoding="utf-8") as f:
+    backup = PATH + ".bak_qts"
+    shutil.copy(PATH, backup)
+    print("  backup ->", backup)
+
+    with open(PATH, "w", encoding="utf-8") as f:
         f.write(src)
 
     try:
-        py_compile.compile(path, doraise=True)
+        py_compile.compile(PATH, doraise=True)
         print("  syntax OK")
     except py_compile.PyCompileError as e:
-        shutil.copy(backup, path)
-        print("  ! syntax error — restored from backup")
+        shutil.copy(backup, PATH)
+        print("  ! syntax error — restored")
         print(e)
         sys.exit(1)
 
     print()
-    print("Done.  Try it:")
-    print("    python create.py --db --loader-only")
+    print("=" * 62)
+    print("Now rebuild the DB from scratch:")
+    print("=" * 62)
     print()
-    print("This reads metadata from the existing data/main.db (or")
-    print("main.db), skips the package walk, and re-emits main.py")
-    print("in under a second.")
+    print("    rm main.db")
+    print("    bash build.sh")
+    print()
+    print("The 'rm main.db' is important — the append-only logic keeps")
+    print("the 18606 rows already mis-categorised under PyQt5/Qt.  A")
+    print("fresh build replaces them with correctly-routed rows.")
+    print()
+    print("After the build, verify:")
+    print()
+    print("    python3 -c \"import sqlite3; c=sqlite3.connect('main.db');"
+          " [print(r) for r in c.execute('SELECT category, COUNT(*) "
+          "FROM nodes WHERE category LIKE \\\"PyQt5/Qt%\\\" "
+          "GROUP BY category ORDER BY 2 DESC LIMIT 15')]\"")
+    print()
+    print("Expected: PyQt5/QtCore, PyQt5/QtGui, PyQt5/QtWidgets each")
+    print("with 100-400 nodes, and PyQt5/Qt with only a handful.")
 
 
 if __name__ == "__main__":

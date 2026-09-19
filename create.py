@@ -110,6 +110,15 @@ PROGRESS_EVERY = 100
 # this, something is wrong.  Override by editing this constant.
 HARD_SAFETY_CAP = 500_000
 
+
+# ------------------------------------------------------------------ #
+#  Debug / introspection                                              #
+# ------------------------------------------------------------------ #
+
+_DEBUG     = False
+_LIST_ONLY = False
+
+
 COLOR_PALETTE = [
     "#4A6B8A", "#8A4A4A", "#4A8A6B", "#6B4A8A",
     "#8A7A4A", "#4A7A8A", "#7A4A8A", "#7A6B3A",
@@ -315,6 +324,20 @@ def _build_parser():
     p.add_argument(
         "--quiet", action="store_true",
         help="suppress progress output",
+    )
+    p.add_argument(
+        "--deep-c", dest="deep_c", action="store_true",
+        help="for compiled extensions (.so / .pyd), also register "
+             "nested classes and enums.  Off by default.",
+    )
+    p.add_argument(
+        "--debug", dest="debug", action="store_true",
+        help="verbose walk logging: every module considered and why "
+             "each object was kept or dropped.",
+    )
+    p.add_argument(
+        "--list-modules", dest="list_modules", action="store_true",
+        help="print every module discovery would visit, then exit.",
     )
     p.add_argument(
         "--loader-only", dest="loader_only", action="store_true",
@@ -549,14 +572,23 @@ def _safe_import(name):
 
 def discover_modules(root_cat, package_name, max_depth, quiet=False):
     results = [(root_cat, package_name, 0)]
+    if _DEBUG:
+        print("[debug] discover %-42s cat=%s depth=%d"
+              % (package_name, root_cat, max_depth))
+
     pkg = _safe_import(package_name)
     if pkg is None:
+        if _DEBUG:
+            print("[debug]   import failed")
         if not quiet:
             print("  ! could not import %s" % package_name)
         return results
     pkg_path = getattr(pkg, "__path__", None)
     if pkg_path is None:
+        if _DEBUG:
+            print("[debug]   no __path__")
         return results
+
     base_depth = package_name.count(".")
     devnull = io.StringIO()
     try:
@@ -568,16 +600,46 @@ def discover_modules(root_cat, package_name, max_depth, quiet=False):
                             pkg_path, package_name + "."):
                         name = info.name
                         leaf = name.rsplit(".", 1)[-1]
+
                         if leaf.startswith("_"):
+                            if _DEBUG:
+                                print("[debug]   skip %-42s leaf starts _"
+                                      % name)
                             continue
                         if _skip_module(name):
+                            if _DEBUG:
+                                print("[debug]   skip %-42s SKIP_PREFIXES"
+                                      % name)
                             continue
                         depth = name.count(".") - base_depth
                         if depth > max_depth:
+                            if _DEBUG:
+                                print("[debug]   skip %-42s depth %d > %d"
+                                      % (name, depth, max_depth))
                             continue
-                        results.append((module_to_category(root_cat, name),
-                                        name, depth))
+
+                        origin = ""
+                        try:
+                            sp = importlib.util.find_spec(name)
+                            origin = (sp.origin or "") if sp else ""
+                        except Exception:
+                            pass
+                        if info.ispkg:
+                            kind = "pkg"
+                        elif origin.endswith((".so", ".pyd", ".dylib")):
+                            kind = "c-ext"
+                        else:
+                            kind = "mod"
+                        if _DEBUG:
+                            print("[debug]   keep %-42s %-5s %s"
+                                  % (name, kind, origin))
+
+                        results.append(
+                            (module_to_category(root_cat, name),
+                             name, depth))
     except BaseException as ex:
+        if _DEBUG:
+            print("[debug]   walk failed: %s" % ex)
         if not quiet:
             print("  ! walk failed for %s: %s" % (package_name, ex))
     results.sort(key=lambda r: (r[2], r[1]))
@@ -588,17 +650,149 @@ def discover_modules(root_cat, package_name, max_depth, quiet=False):
 #  Collect                                                       #
 # ============================================================== #
 
-def collect_from_module(cat, mod_path, seen_names, specs_out, limit):
+def _is_c_extension(mod_path):
+    """Return True when mod_path resolves to a compiled extension.
+
+    Handles .so (Linux), .pyd (Windows), and .dylib (macOS).  Uses
+    importlib.util.find_spec so it does NOT import the module.
+    """
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.find_spec(mod_path)
+    except (ImportError, ValueError, AttributeError):
+        return False
+    if spec is None:
+        return False
+    origin = spec.origin or ""
+    return origin.endswith((".so", ".pyd", ".dylib"))
+
+
+def _collect_from_c_extension(mod, mod_path, cat, seen_names,
+                              specs_out, limit, exc_only, deep=False):
+    """Enumerate classes and functions from a compiled extension.
+
+    Re-exports are a real problem: PyQt5.Qt contains the whole Qt
+    API copied from QtCore, QtGui, etc.  We route each object to the
+    category named by its own __module__ when that points to a
+    specific PyQt5.* submodule, so QObject lands under PyQt5/QtCore
+    even when discovered via PyQt5.Qt.
+    """
+    added = 0
+    try:
+        members = list(vars(mod).items())
+    except Exception:
+        members = []
+
+    for name, obj in members:
+        if len(specs_out) >= limit:
+            break
+        if name.startswith("_"):
+            continue
+        if name in seen_names:
+            continue
+        if not (inspect.isclass(obj) or inspect.isroutine(obj)):
+            continue
+
+        is_exc = _is_exception_class(obj)
+        if exc_only and not is_exc:
+            continue
+
+        # ---- category routing ---- #
+        # Prefer the object's own __module__ when it points to a
+        # specific module inside the same package.  Ignore SIP
+        # placeholders and the empty string.
+        spec_cat = cat
+        real_mod = getattr(obj, "__module__", None) or ""
+        if (real_mod
+                and real_mod != mod_path
+                and "." in real_mod
+                and not real_mod.startswith("sip")
+                and not real_mod.startswith("PyQt5.sip")):
+            spec_cat = real_mod.replace(".", "/")
+
+        seen_names.add(name)
+
+        if is_exc:
+            spec_cat = EXCEPTIONS_CATEGORY
+            qualname = _exception_qualname(obj, name)
+        else:
+            qualname = None
+
+        spec = {
+            "name":        name,
+            "color":       color_for(spec_cat),
+            "category":    spec_cat,
+            "description": get_doc(obj),
+            "qualname":    qualname,
+            "inputs":      get_params(obj),
+            "outputs":     [(name, "object",
+                             "Result of %s.%s" % (mod_path, name))],
+            "full_path":   "%s.%s" % (mod_path, name),
+        }
+
+        _nc = _node_class_for(mod_path, name)
+        if _nc:
+            spec["node_class"] = _nc
+
+        specs_out.append(spec)
+        added += 1
+
+        if deep and inspect.isclass(obj) and len(specs_out) < limit:
+            try:
+                inner = list(vars(obj).items())
+            except Exception:
+                inner = []
+            for inner_name, inner_obj in inner:
+                if inner_name.startswith("_"):
+                    continue
+                full_inner = "%s.%s" % (name, inner_name)
+                if full_inner in seen_names:
+                    continue
+                if not (inspect.isclass(inner_obj)
+                        or inspect.isroutine(inner_obj)):
+                    continue
+                seen_names.add(full_inner)
+                sub = {
+                    "name":        full_inner,
+                    "color":       color_for(spec_cat),
+                    "category":    spec_cat,
+                    "description": get_doc(inner_obj),
+                    "qualname":    ("%s.%s" % (qualname, inner_name))
+                                   if qualname else None,
+                    "inputs":      get_params(inner_obj),
+                    "outputs":     [(inner_name, "object",
+                                     "Nested attribute of %s.%s"
+                                     % (mod_path, name))],
+                    "full_path":   "%s.%s.%s" % (mod_path, name, inner_name),
+                }
+                specs_out.append(sub)
+                added += 1
+
+    return added
+
+def collect_from_module(cat, mod_path, seen_names, specs_out, limit,
+                        deep_c=False):
     if len(specs_out) >= limit:
         return 0
     mod = _safe_import(mod_path)
     if mod is None:
         return 0
+
+    exc_only = mod_path in _EXCEPTIONS_ONLY_ROOTS
+
+    # Compiled extensions (.so / .pyd / .dylib) have no submodules;
+    # their public API lives entirely in the module namespace.  They
+    # also report __module__ inconsistently, so the __module__ root
+    # check below is unreliable for them.
+    if _is_c_extension(mod_path):
+        return _collect_from_c_extension(
+            mod, mod_path, cat, seen_names, specs_out, limit,
+            exc_only, deep=deep_c)
+
     top_level = "." not in mod_path
     root = mod_path.split(".")[0]
     real_root = getattr(mod, "__name__", root).split(".")[0]
     roots = {root, real_root}
-    exc_only = mod_path in _EXCEPTIONS_ONLY_ROOTS
     added = 0
     for name in dir(mod):
         if len(specs_out) >= limit:
@@ -611,13 +805,11 @@ def collect_from_module(cat, mod_path, seen_names, specs_out, limit):
             obj = getattr(mod, name)
         except BaseException:
             continue
-        # isroutine covers Python functions, C functions, and methods.
-        # isclass covers classes and exceptions.
         if not (inspect.isclass(obj) or inspect.isroutine(obj)):
             continue
         if not top_level:
             obj_mod = getattr(obj, "__module__", "") or ""
-            if not any(obj_mod.startswith(r) for r in roots):
+            if obj_mod and not any(obj_mod.startswith(r) for r in roots):
                 continue
         is_exc = _is_exception_class(obj)
         if exc_only and not is_exc:
@@ -651,7 +843,8 @@ def collect_from_module(cat, mod_path, seen_names, specs_out, limit):
     return added
 
 
-def _walk_one_package(cat, pkg, seen_names, max_depth, cap, quiet=False):
+def _walk_one_package(cat, pkg, seen_names, max_depth, cap, quiet=False,
+                      deep_c=False):
     def say(*a):
         if not quiet:
             print(*a)
@@ -662,7 +855,12 @@ def _walk_one_package(cat, pkg, seen_names, max_depth, cap, quiet=False):
         if not quiet and i % PROGRESS_EVERY == 0:
             say("    ... %d / %d modules, %d nodes"
                 % (i, len(modules), len(pkg_specs)))
-        collect_from_module(mcat, mod_path, seen_names, pkg_specs, cap)
+        try:
+            collect_from_module(mcat, mod_path, seen_names, pkg_specs,
+                                cap, deep_c=deep_c)
+        except TypeError:
+            collect_from_module(mcat, mod_path, seen_names,
+                                pkg_specs, cap)
         if len(pkg_specs) >= cap:
             say("    cap reached for %s (%d nodes)" % (pkg, cap))
             break
@@ -670,16 +868,8 @@ def _walk_one_package(cat, pkg, seen_names, max_depth, cap, quiet=False):
 
 
 def collect(packages, max_depth, default_cap, quiet=False,
-            cap_map=None, no_cap=False):
-    """
-    Walk every (category, module) in `packages`, then every entry in
-    EXTRA_ROOTS that hasn't already been walked.
-
-    cap resolution for a package `pkg`:
-        1. cap_map[pkg]    if present (from -cl / --cap-libs)
-        2. no_cap -> infinity
-        3. default_cap     otherwise
-    """
+            cap_map=None, no_cap=False, deep_c=False):
+    """Walk every (category, module) in packages, then EXTRA_ROOTS."""
     cap_map = cap_map or {}
 
     def say(*a):
@@ -702,7 +892,8 @@ def collect(packages, max_depth, default_cap, quiet=False,
         walked_modules.add(pkg)
         cap = cap_for(pkg)
         pkg_specs = _walk_one_package(
-            cat, pkg, seen_names, max_depth, cap, quiet)
+            cat, pkg, seen_names, max_depth, cap, quiet,
+            deep_c=deep_c)
         all_specs.extend(pkg_specs)
         say("    -> %s: %d nodes%s"
             % (pkg, len(pkg_specs),
@@ -710,12 +901,11 @@ def collect(packages, max_depth, default_cap, quiet=False,
 
     for cat, mod_path in EXTRA_ROOTS:
         if mod_path in walked_modules:
-            # already walked from -l; don't register the same objects
-            # under a second category.
             continue
         walked_modules.add(mod_path)
         pkg_specs = _walk_one_package(
-            cat, mod_path, seen_names, max_depth, EXTRA_ROOT_CAP, quiet)
+            cat, mod_path, seen_names, max_depth, EXTRA_ROOT_CAP, quiet,
+            deep_c=deep_c)
         all_specs.extend(pkg_specs)
 
     all_specs.sort(key=lambda s: (s["category"], s["name"].lower()))
@@ -1080,39 +1270,73 @@ def emit_json(specs, out_file, json_path,
 
 def emit_db(specs, out_file, db_path,
             torch_version, torch_path, packages):
-    """Emit a SQLite database, with an FTS5 index over name /
-    description / category.
+    """Append or update a SQLite database.
 
-    The `node_search` table is created as an external-content FTS5
-    table (content='nodes'), so the text is not duplicated — only the
-    inverted index is stored, and its rowid matches nodes.id.  Triggers
-    keep it in sync with `nodes` on INSERT, DELETE, and UPDATE.
+    Unlike a fresh emit, this mode is designed to accumulate:
+
+      * missing parent directories are created first, which fixes
+        the "unable to open database file" error when db_path is
+        something like  data/main.db  and data/ does not yet exist;
+      * the file is not deleted — existing nodes stay, new ones are
+        added, matching names are left alone;
+      * schema and index creation uses IF NOT EXISTS so running
+        twice is a no-op;
+      * metadata rows are upserted with INSERT OR REPLACE, and
+        node_count reflects the total after the run.
+
+    To force a fresh rebuild, delete the file first:
+
+        rm data/main.db
     """
     date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    if os.path.isfile(db_path):
-        os.remove(db_path)
+    # Fix: create parent directory if missing.  sqlite3.connect()
+    # will fail with "unable to open database file" if any parent
+    # of db_path does not exist.
+    db_path = os.path.abspath(db_path)
+    parent = os.path.dirname(db_path)
+    if parent and not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+            print("  created directory %s" % parent)
+        except OSError as ex:
+            print("  ! could not create %s: %s" % (parent, ex))
+            raise
 
+    # If the file exists but is not writable, sqlite3.connect
+    # still succeeds — the failure happens on the first write with
+    # the unhelpful message "unable to open database file".  Catch
+    # the two common causes up front and report something useful.
+    if os.path.exists(db_path):
+        if not os.access(db_path, os.W_OK):
+            print("  ! %s is not writable" % db_path)
+            try:
+                import pwd
+                st = os.stat(db_path)
+                owner = pwd.getpwuid(st.st_uid).pw_name
+                me = pwd.getpwuid(os.getuid()).pw_name
+                if owner != me:
+                    print("    owned by %r, running as %r" % (owner, me))
+                    print("    fix:  sudo chown %s %s" % (me, db_path))
+                else:
+                    print("    mode is %o; fix: chmod u+w %s"
+                          % (st.st_mode & 0o777, db_path))
+            except Exception:
+                pass
+            raise PermissionError(db_path)
+
+    print("  opening %s" % db_path)
     con = sqlite3.connect(db_path)
     try:
         con.execute("""
-            CREATE TABLE metadata (
+            CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-        for k, v in (
-            ("format", "pytorchui-nodes"),
-            ("version", "2"),
-            ("torch_version", torch_version),
-            ("torch_path", torch_path),
-            ("generated", date),
-            ("node_count", str(len(specs))),
-        ):
-            con.execute("INSERT INTO metadata VALUES (?, ?)", (k, v))
 
         con.execute("""
-            CREATE TABLE nodes (
+            CREATE TABLE IF NOT EXISTS nodes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 color TEXT,
@@ -1126,13 +1350,17 @@ def emit_db(specs, out_file, db_path,
                 UNIQUE(name)
             )
         """)
-        con.execute("CREATE INDEX idx_nodes_category ON nodes(category)")
-        con.execute("CREATE INDEX idx_nodes_full_path ON nodes(full_path)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_nodes_category "
+                    "ON nodes(category)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_nodes_full_path "
+                    "ON nodes(full_path)")
 
-        # ---- FTS5 virtual table ----
+        # FTS5 virtual table.  IF NOT EXISTS is supported since
+        # SQLite 3.9.0.
+        fts_ok = False
         try:
             con.execute("""
-                CREATE VIRTUAL TABLE node_search USING fts5(
+                CREATE VIRTUAL TABLE IF NOT EXISTS node_search USING fts5(
                     name,
                     description,
                     category,
@@ -1144,11 +1372,11 @@ def emit_db(specs, out_file, db_path,
             fts_ok = True
         except sqlite3.OperationalError as ex:
             print("  ! FTS5 unavailable (%s); writing plain table" % ex)
-            fts_ok = False
 
         if fts_ok:
             con.execute("""
-                CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN
+                CREATE TRIGGER IF NOT EXISTS nodes_ai
+                AFTER INSERT ON nodes BEGIN
                     INSERT INTO node_search(
                         rowid, name, description, category)
                     VALUES (new.id, new.name, new.description,
@@ -1156,7 +1384,8 @@ def emit_db(specs, out_file, db_path,
                 END
             """)
             con.execute("""
-                CREATE TRIGGER nodes_ad AFTER DELETE ON nodes BEGIN
+                CREATE TRIGGER IF NOT EXISTS nodes_ad
+                AFTER DELETE ON nodes BEGIN
                     INSERT INTO node_search(
                         node_search, rowid, name, description, category)
                     VALUES ('delete', old.id, old.name,
@@ -1164,7 +1393,8 @@ def emit_db(specs, out_file, db_path,
                 END
             """)
             con.execute("""
-                CREATE TRIGGER nodes_au AFTER UPDATE ON nodes BEGIN
+                CREATE TRIGGER IF NOT EXISTS nodes_au
+                AFTER UPDATE ON nodes BEGIN
                     INSERT INTO node_search(
                         node_search, rowid, name, description, category)
                     VALUES ('delete', old.id, old.name,
@@ -1176,24 +1406,81 @@ def emit_db(specs, out_file, db_path,
                 END
             """)
 
+        # Snapshot existing rows so we can classify each spec as
+        # new / changed / unchanged before writing anything.
+        existing = {}
+        for row in con.execute(
+                "SELECT name, color, category, description, qualname, "
+                "node_class, inputs, outputs, full_path FROM nodes"):
+            existing[row[0]] = row[1:]
+
         rows = []
+        added = updated = unchanged = 0
         for s in specs:
-            rows.append((
-                s["name"], s["color"], s["category"],
-                s["description"], s.get("qualname"),
-                s.get("node_class"),
+            new_row = (
+                s["color"], s["category"], s["description"],
+                s.get("qualname"), s.get("node_class"),
                 json.dumps([list(t) for t in s["inputs"]]),
                 json.dumps([list(t) for t in s["outputs"]]),
                 s["full_path"],
-            ))
+            )
+            old = existing.get(s["name"])
+            if old is None:
+                added += 1
+            elif tuple(old) == new_row:
+                unchanged += 1
+            else:
+                updated += 1
+            rows.append((s["name"],) + new_row)
+
         if rows:
+            # Upsert: new rows are inserted; existing rows whose
+            # content changed are updated in place; existing rows
+            # with identical content are left alone.  The WHERE
+            # clause on the DO UPDATE is what makes "unchanged"
+            # actually a no-op at the SQLite level, which keeps the
+            # FTS triggers quiet for rows that did not move.
             con.executemany(
-                "INSERT OR IGNORE INTO nodes "
+                "INSERT INTO nodes "
                 "(name, color, category, description, qualname, "
                 " node_class, inputs, outputs, full_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "  color = excluded.color, "
+                "  category = excluded.category, "
+                "  description = excluded.description, "
+                "  qualname = excluded.qualname, "
+                "  node_class = excluded.node_class, "
+                "  inputs = excluded.inputs, "
+                "  outputs = excluded.outputs, "
+                "  full_path = excluded.full_path "
+                "WHERE nodes.color       IS NOT excluded.color "
+                "   OR nodes.category    IS NOT excluded.category "
+                "   OR nodes.description IS NOT excluded.description "
+                "   OR nodes.qualname    IS NOT excluded.qualname "
+                "   OR nodes.node_class  IS NOT excluded.node_class "
+                "   OR nodes.inputs      IS NOT excluded.inputs "
+                "   OR nodes.outputs     IS NOT excluded.outputs "
+                "   OR nodes.full_path   IS NOT excluded.full_path",
                 rows,
             )
+        con.commit()
+
+        total = con.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+
+        # Upsert metadata.  node_count reflects the total after the
+        # upsert, not just what was passed in.
+        for k, v in (
+            ("format", "pytorchui-nodes"),
+            ("version", "2"),
+            ("torch_version", torch_version),
+            ("torch_path", torch_path),
+            ("generated", date),
+            ("node_count", str(total)),
+        ):
+            con.execute(
+                "INSERT OR REPLACE INTO metadata VALUES (?, ?)",
+                (k, v))
         con.commit()
 
         # Merge FTS5 b-tree segments into one for fast queries.
@@ -1205,6 +1492,9 @@ def emit_db(specs, out_file, db_path,
                 con.commit()
             except sqlite3.OperationalError:
                 pass
+
+        print("  total %d nodes, %d new, %d updated, %d unchanged"
+              % (total, added, updated, unchanged))
     finally:
         con.close()
 
@@ -1217,7 +1507,7 @@ def emit_db(specs, out_file, db_path,
                 .replace("{version}", torch_version)
                 .replace("{torch_path}", torch_path)
                 .replace("{date}", date)
-                .replace("{node_count}", str(len(specs))))
+                .replace("{node_count}", str(total)))
         f.write(_hdr)
         f.write(FOOTER)
 
@@ -1294,9 +1584,13 @@ def emit_loader_only(out_file, data_file, data_format,
 
 
 def main(argv=None):
+    global _DEBUG, _LIST_ONLY
     warnings.filterwarnings("ignore")
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    _DEBUG     = bool(getattr(args, "debug", False))
+    _LIST_ONLY = bool(getattr(args, "list_modules", False))
 
     fmt = _resolve_format(args)
 
@@ -1359,6 +1653,17 @@ def main(argv=None):
         print("! nothing to walk.  Use -l LIBRARY, or drop --no-torch.")
         sys.exit(2)
 
+    if _LIST_ONLY:
+        print("Modules discovery would visit:")
+        for cat, pkg in packages:
+            print()
+            print("  %-40s (category %s)" % (pkg, cat))
+            mods = discover_modules(cat, pkg, args.max_depth, quiet=True)
+            for mcat, mod_path, depth in mods:
+                indent = "  " * (depth + 1)
+                print("    %s%-50s -> %s" % (indent, mod_path, mcat))
+        return
+
     if not args.quiet:
         print("output format:", fmt)
         if args.no_torch:
@@ -1397,6 +1702,7 @@ def main(argv=None):
         args.quiet,
         cap_map=cap_map,
         no_cap=args.no_cap,
+        deep_c=getattr(args, "deep_c", False),
     )
     if not args.quiet:
         print("Collected %d nodes total" % len(specs))
@@ -1405,7 +1711,13 @@ def main(argv=None):
         for cat, n in sorted(c.items()):
             print("  %-30s %d nodes" % (cat, n))
 
-    for p in (args.out_file, args.json_path, args.db_path):
+    # The database is append-only — do NOT delete it before emit.
+    # Only the loader is cleared, since it is regenerated from
+    # scratch.  If fmt is json, the json data file is rewritten by
+    # emit_json's open(..., "w"), so it does not need to be removed
+    # here either.
+    _cleanup_targets = [args.out_file]
+    for p in _cleanup_targets:
         if os.path.isfile(p):
             try:
                 os.remove(p)
