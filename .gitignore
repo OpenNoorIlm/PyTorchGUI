@@ -140,3 +140,5 @@ generated.py
 *.bak_*
 **/__pycache__/
 *.pyc
+edit.py
+dos.sh

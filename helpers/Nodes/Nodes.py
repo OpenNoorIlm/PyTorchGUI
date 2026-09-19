@@ -702,6 +702,283 @@ class _Runtime:
     def error(self, node_id, err):
         self._emit("error", str(node_id), json.dumps(str(err)))
 
+    # -------- richer preview API -------- #
+
+    def _ns(self, d):
+        import types
+        return types.SimpleNamespace(**d)
+
+    def _emit_media(self, node_id, payload):
+        try:
+            self._emit("media", str(node_id), json.dumps(payload))
+        except Exception as ex:
+            print("[media] emit failed:", ex)
+
+    def preview_image(self, node_id, source, title="", scale=1.0,
+                      width=0, height=0, grid=False, normalize=True):
+        path = self._materialize_media(source)
+        meta = {"Path": path or "",
+                "Width": 0, "Height": 0,
+                "Mode": "", "Format": "", "Size": 0}
+        if path:
+            try:
+                from PIL import Image as _I
+                im = _I.open(path)
+                meta["Width"] = im.width
+                meta["Height"] = im.height
+                meta["Mode"] = im.mode or ""
+                meta["Format"] = im.format or ""
+                im.close()
+            except Exception:
+                pass
+            try:
+                import os as _os
+                meta["Size"] = _os.path.getsize(path)
+            except Exception:
+                pass
+        self._emit_media(node_id, {
+            "kind": "image", "path": path or "",
+            "title": str(title), "scale": float(scale),
+            "width": int(width), "height": int(height),
+            "grid": bool(grid),
+        })
+        return self._ns(meta)
+
+    def preview_audio(self, node_id, source, title="", autoplay=True,
+                      loop=False, volume=1.0, start=0.0):
+        path = self._materialize_media(source)
+        meta = {"Path": path or "",
+                "Duration": 0.0, "SampleRate": 0,
+                "Channels": 0, "Format": ""}
+        if path:
+            try:
+                import wave as _w
+                with _w.open(path, "rb") as wf:
+                    frames = wf.getnframes()
+                    sr = wf.getframerate() or 1
+                    meta["Duration"] = frames / sr
+                    meta["SampleRate"] = sr
+                    meta["Channels"] = wf.getnchannels()
+                    meta["Format"] = "wav"
+            except Exception:
+                pass
+        self._emit_media(node_id, {
+            "kind": "audio", "path": path or "",
+            "title": str(title), "autoplay": bool(autoplay),
+            "loop": bool(loop), "volume": float(volume),
+            "start": float(start),
+        })
+        return self._ns(meta)
+
+    def preview_video(self, node_id, source, title="", autoplay=True,
+                      loop=False, start=0.0, end=0.0, muted=False):
+        path = self._materialize_media(source)
+        meta = {"Path": path or "", "Duration": 0.0,
+                "FPS": 0.0, "Width": 0, "Height": 0, "Codec": ""}
+        self._emit_media(node_id, {
+            "kind": "video", "path": path or "",
+            "title": str(title), "autoplay": bool(autoplay),
+            "loop": bool(loop), "start": float(start),
+            "end": float(end), "muted": bool(muted),
+        })
+        return self._ns(meta)
+
+    def preview_folder(self, node_id, source, filter="*",
+                       recursive=False, columns=0, thumb_size=128,
+                       sort="name"):
+        import os as _os
+        import glob as _g
+        folder = str(source or ".")
+        if not _os.path.isdir(folder):
+            folder = _os.path.dirname(folder)
+        pattern = _os.path.join(folder, "**", filter) if recursive \
+                  else _os.path.join(folder, filter)
+        files = []
+        try:
+            files = [p for p in _g.glob(pattern, recursive=recursive)
+                     if _os.path.isfile(p)]
+        except Exception:
+            pass
+        if sort == "size":
+            try:
+                files.sort(key=lambda p: _os.path.getsize(p), reverse=True)
+            except Exception:
+                pass
+        elif sort == "mtime":
+            try:
+                files.sort(key=lambda p: _os.path.getmtime(p), reverse=True)
+            except Exception:
+                pass
+        self._emit_media(node_id, {
+            "kind": "folder", "folder": folder,
+            "files": files[:2000],
+            "count": len(files),
+            "columns": int(columns),
+            "thumb": int(thumb_size),
+        })
+        return self._ns({
+            "Path": folder,
+            "Count": len(files),
+            "Files": files,
+            "First": files[0] if files else "",
+        })
+
+    def preview_table(self, node_id, source, title="", max_rows=100,
+                      max_cols=20, editable=False):
+        cols, rows = [], []
+        try:
+            if hasattr(source, "to_dict") and hasattr(source, "columns"):
+                df = source.head(int(max_rows))
+                cols = [str(c) for c in list(df.columns)[:int(max_cols)]]
+                rows = [[repr(v) for v in r]
+                        for r in df.values.tolist()]
+            elif isinstance(source, dict):
+                cols = ["key", "value"]
+                items = list(source.items())[:int(max_rows)]
+                rows = [[str(k), repr(v)] for k, v in items]
+            elif isinstance(source, (list, tuple)):
+                if source and isinstance(source[0], dict):
+                    cols = list(source[0].keys())[:int(max_cols)]
+                    rows = [[repr(r.get(c)) for c in cols]
+                            for r in source[:int(max_rows)]]
+                else:
+                    cols = ["value"]
+                    rows = [[repr(x)] for x in source[:int(max_rows)]]
+            else:
+                cols = ["repr"]
+                rows = [[repr(source)]]
+        except Exception as ex:
+            print("[preview_table]", ex)
+        self._emit_media(node_id, {
+            "kind": "table", "title": str(title),
+            "cols": cols, "rows": rows,
+            "editable": bool(editable),
+        })
+        return self._ns({
+            "Rows": len(rows), "Cols": len(cols),
+            "Columns": cols,
+            "FirstRow": rows[0] if rows else [],
+        })
+
+    def preview_text(self, node_id, source, title="", max_lines=500,
+                     wrap=True, monospace=True, highlight=""):
+        text = "" if source is None else str(source)
+        lines = text.split("\n")
+        if len(lines) > int(max_lines):
+            text = "\n".join(lines[:int(max_lines)]) + "\n... (truncated)"
+        self._emit_media(node_id, {
+            "kind": "text", "title": str(title), "text": text,
+            "wrap": bool(wrap), "monospace": bool(monospace),
+            "highlight": str(highlight),
+        })
+        return self._ns({
+            "Text": text,
+            "Length": len(text),
+            "Lines": len(lines),
+        })
+
+    def preview_json(self, node_id, source, title="", indent=2,
+                     sort=False, max_depth=20):
+        import json as _j
+        valid = True
+        try:
+            text = _j.dumps(source, indent=int(indent), default=repr,
+                            sort_keys=bool(sort))
+        except Exception:
+            valid = False
+            text = repr(source)
+        keys = list(source.keys()) if isinstance(source, dict) else []
+        self._emit_media(node_id, {
+            "kind": "json", "title": str(title),
+            "text": text, "valid": valid,
+        })
+        return self._ns({
+            "Text": text, "Valid": valid,
+            "Keys": keys, "Length": len(text),
+        })
+
+    def preview_plot(self, node_id, x=None, y=None, kind="line",
+                     title="", xlabel="", ylabel="",
+                     color="#E08C4A", figsize_w=8.0, figsize_h=5.0):
+        import os as _os
+        import tempfile as _tmp
+        path = ""
+        xmin = xmax = ymin = ymax = 0.0
+        npts = 0
+        try:
+            import matplotlib
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(
+                figsize=(float(figsize_w), float(figsize_h)))
+            fig.patch.set_facecolor("#1E1E1E")
+            ax.set_facecolor("#242424")
+            for s in ("bottom", "top", "left", "right"):
+                ax.spines[s].set_color("#555")
+            ax.tick_params(colors="#CCC")
+            if kind == "hist" and y is None:
+                ax.hist(list(x), bins=min(30, max(5, len(x) // 4)),
+                        color=color)
+                npts = len(x)
+                xmin, xmax = float(min(x)), float(max(x))
+            elif kind == "pie":
+                ax.pie(list(y) if y is not None else list(x))
+                npts = len(y) if y is not None else len(x)
+            else:
+                xs = list(range(len(y))) if x is None else list(x)
+                ys = list(y) if y is not None else list(x)
+                npts = len(ys)
+                if kind == "bar":
+                    ax.bar(range(len(ys)), ys, color=color)
+                elif kind == "scatter":
+                    ax.scatter(xs, ys, color=color)
+                elif kind == "step":
+                    ax.step(xs, ys, color=color)
+                elif kind == "fill":
+                    ax.fill_between(range(len(ys)), ys, color=color,
+                                    alpha=0.4)
+                else:
+                    ax.plot(xs, ys, color=color, linewidth=2)
+                try:
+                    xmin, xmax = float(min(xs)), float(max(xs))
+                    ymin, ymax = float(min(ys)), float(max(ys))
+                except Exception:
+                    pass
+            if title:  ax.set_title(title, color="#EEE")
+            if xlabel: ax.set_xlabel(xlabel, color="#AAA")
+            if ylabel: ax.set_ylabel(ylabel, color="#AAA")
+            f = _tmp.NamedTemporaryFile(suffix=".png", delete=False)
+            f.close()
+            fig.savefig(f.name, facecolor="#1E1E1E", bbox_inches="tight")
+            plt.close(fig)
+            path = f.name
+        except Exception as ex:
+            print("[preview_plot]", ex)
+        self._emit_media(node_id, {
+            "kind": "image", "path": path,
+            "title": str(title), "scale": 1.0,
+            "width": 0, "height": 0, "grid": False,
+        })
+        return self._ns({
+            "Path": path, "Points": npts,
+            "XMin": xmin, "XMax": xmax,
+            "YMin": ymin, "YMax": ymax,
+        })
+
+    def preview_html(self, node_id, source, title="", height=400):
+        self._emit_media(node_id, {
+            "kind": "html", "title": str(title),
+            "text": str(source or ""), "height": int(height),
+        })
+        return self._ns({"Rendered": True})
+
+    def preview_markdown(self, node_id, source, title="", height=400):
+        self._emit_media(node_id, {
+            "kind": "markdown", "title": str(title),
+            "text": str(source or ""), "height": int(height),
+        })
+        return self._ns({"Rendered": True})
+
 
 runtime = _Runtime()
 
@@ -2190,7 +2467,47 @@ def build_node_from_template(template):
     )
     n.sections = []
     n._current_section = None
-    for raw in template["sections"]:
+
+    # Templates may arrive in two shapes:
+    #   * the full form   -- template["sections"] = [(name, socks, desc), ...]
+    #   * the shorthand   -- template["inputs"] = [...], template["outputs"] = [...]
+    # register_node() normalises shorthand into sections, but templates
+    # added via NODE_TEMPLATES.extend() at import time skip that step.
+    # Normalise here so both shapes build.
+    _sections = template.get("sections")
+    if _sections is None:
+        _sections = []
+        _ins = template.get("inputs") or []
+        _outs = template.get("outputs") or []
+        if _ins:
+            _norm_in = []
+            for entry in _ins:
+                if len(entry) == 5:
+                    _norm_in.append((entry[0], entry[1], "in",
+                                     entry[2], entry[3], entry[4]))
+                elif len(entry) == 4:
+                    _norm_in.append((entry[0], entry[1], "in",
+                                     entry[2], entry[3]))
+                elif len(entry) == 3:
+                    _norm_in.append((entry[0], entry[1], "in", entry[2]))
+                elif len(entry) == 2:
+                    _norm_in.append((entry[0], entry[1], "in", ""))
+            _sections.append(("Inputs", _norm_in, ""))
+        if _outs:
+            _norm_out = []
+            for entry in _outs:
+                if len(entry) == 4:
+                    _norm_out.append((entry[0], entry[1], "out",
+                                      entry[2], None, entry[3]))
+                elif len(entry) == 3:
+                    _norm_out.append((entry[0], entry[1], "out", entry[2]))
+                elif len(entry) == 2:
+                    _norm_out.append((entry[0], entry[1], "out", ""))
+                else:
+                    _norm_out.append((entry[0], entry[1], "out", ""))
+            _sections.append(("Outputs", _norm_out, ""))
+
+    for raw in _sections:
         if len(raw) == 2:
             sec_name, socks = raw; sec_desc = ""
         else:
@@ -2820,6 +3137,249 @@ NODE_TEMPLATES.extend([
          "outputs": []},
     ]),
 ])
+
+
+
+# ---------------------------------------------------------------- #
+#  Preview category                                                 #
+# ---------------------------------------------------------------- #
+
+NODE_TEMPLATES.extend([
+    ("Preview", [
+        {"name": "Preview Image",
+         "color": "#8A7A4A",
+         "kind": "preview_image",
+         "description":
+             "**Show an image during a run.**\n\n"
+             "Accepts a filesystem path, a PIL image, or a torch "
+             "Tensor of shape (N,C,H,W), (C,H,W), or (H,W) with C in "
+             "{1, 3, 4}.  Values are normalised to [0, 1] if "
+             "Normalize is on.\n\n"
+             "Outputs expose width, height, mode, format and file "
+             "size so they can feed downstream nodes.",
+         "inputs": [
+             ("Source",    "any",    "Path, PIL image, or tensor", "None"),
+             ("Title",     "string", "Window title", "''"),
+             ("Scale",     "float",  "Zoom factor (1.0 = native)", "1.0"),
+             ("Width",     "int",    "Max display width (0 = auto)", "0"),
+             ("Height",    "int",    "Max display height (0 = auto)", "0"),
+             ("Grid",      "bool",   "If multiple images, show as grid", "False"),
+             ("Normalize", "bool",   "Normalise tensor values", "True"),
+         ],
+         "outputs": [
+             ("Path",   "string", "Filesystem path of the shown image"),
+             ("Width",  "int",    "Image width in pixels"),
+             ("Height", "int",    "Image height in pixels"),
+             ("Mode",   "string", "PIL mode (RGB, L, RGBA, ...)"),
+             ("Format", "string", "PNG, JPEG, ..."),
+             ("Size",   "int",    "File size in bytes"),
+         ]},
+
+        {"name": "Preview Audio",
+         "color": "#8A7A4A",
+         "kind": "preview_audio",
+         "description":
+             "**Play an audio file during a run.**\n\n"
+             "Accepts a path to a .wav / .mp3 / .ogg file.  Uses "
+             "QtMultimedia when available.\n\n"
+             "Outputs expose duration, sample rate and channel count.",
+         "inputs": [
+             ("Source",   "any",    "Path to an audio file", "None"),
+             ("Title",    "string", "Window title", "''"),
+             ("Autoplay", "bool",   "Start playing immediately", "True"),
+             ("Loop",     "bool",   "Repeat when finished", "False"),
+             ("Volume",   "float",  "0.0 to 1.0", "1.0"),
+             ("Start",    "float",  "Start position (seconds)", "0.0"),
+         ],
+         "outputs": [
+             ("Path",       "string", "Filesystem path"),
+             ("Duration",   "float",  "Duration in seconds"),
+             ("SampleRate", "int",    "Sample rate in Hz"),
+             ("Channels",   "int",    "Channel count"),
+             ("Format",     "string", "Codec / container"),
+         ]},
+
+        {"name": "Preview Video",
+         "color": "#8A7A4A",
+         "kind": "preview_video",
+         "description":
+             "**Play a video file during a run.**\n\n"
+             "Accepts a path to a .mp4 / .mkv / .webm file.  Uses "
+             "QtMultimedia when available.\n\n"
+             "Outputs expose duration, resolution, frame rate and "
+             "codec.",
+         "inputs": [
+             ("Source",   "any",    "Path to a video file", "None"),
+             ("Title",    "string", "Window title", "''"),
+             ("Autoplay", "bool",   "Start playing immediately", "True"),
+             ("Loop",     "bool",   "Repeat when finished", "False"),
+             ("Start",    "float",  "Start position (seconds)", "0.0"),
+             ("End",      "float",  "End position (0 = until end)", "0.0"),
+             ("Muted",    "bool",   "Silence the audio", "False"),
+         ],
+         "outputs": [
+             ("Path",     "string", "Filesystem path"),
+             ("Duration", "float",  "Duration in seconds"),
+             ("FPS",      "float",  "Frames per second"),
+             ("Width",    "int",    "Frame width"),
+             ("Height",   "int",    "Frame height"),
+             ("Codec",    "string", "Codec name"),
+         ]},
+
+        {"name": "Preview Folder",
+         "color": "#8A7A4A",
+         "kind": "preview_folder",
+         "description":
+             "**List the contents of a folder.**\n\n"
+             "Shows a table of filenames, sizes and modification "
+             "times.  Optional glob filter and recursion.\n\n"
+             "Outputs the file list and count so downstream nodes "
+             "can iterate or filter them.",
+         "inputs": [
+             ("Source",    "string", "Folder path", "'.'"),
+             ("Filter",    "string", "Glob pattern", "'*'"),
+             ("Recursive", "bool",   "Include subfolders", "False"),
+             ("Columns",   "int",    "Grid columns (0 = table)", "0"),
+             ("ThumbSize", "int",    "Thumbnail size in pixels", "128"),
+             ("Sort",      "string", "name | size | mtime", "'name'"),
+         ],
+         "outputs": [
+             ("Path",  "string", "Folder path"),
+             ("Count", "int",    "Number of matching files"),
+             ("Files", "any",    "List of full paths"),
+             ("First", "string", "Path of the first file"),
+         ]},
+
+        {"name": "Preview Table",
+         "color": "#8A7A4A",
+         "kind": "preview_table",
+         "description":
+             "**Show a table.**\n\n"
+             "Accepts a pandas DataFrame, a list of dicts, a dict, "
+             "or a list of lists.  Renders as a QTableWidget.\n\n"
+             "Outputs row count, column count, column names and the "
+             "first row so downstream logic can branch on shape.",
+         "inputs": [
+             ("Source",   "any",    "DataFrame / dict / list", "None"),
+             ("Title",    "string", "Window title", "''"),
+             ("MaxRows",  "int",    "Truncate after N rows", "100"),
+             ("MaxCols",  "int",    "Truncate after N columns", "20"),
+             ("Editable", "bool",   "Allow cell editing", "False"),
+         ],
+         "outputs": [
+             ("Rows",    "int", "Rows displayed"),
+             ("Cols",    "int", "Columns displayed"),
+             ("Columns", "any", "List of column names"),
+             ("FirstRow","any", "First row as a list"),
+         ]},
+
+        {"name": "Preview Text",
+         "color": "#8A7A4A",
+         "kind": "preview_text",
+         "description":
+             "**Show a text blob.**\n\n"
+             "Any value is stringified and displayed in a "
+             "scrollable viewer.  Optional line limit, word wrap "
+             "and monospace font.\n\n"
+             "Outputs the exact text that was shown.",
+         "inputs": [
+             ("Source",     "any",    "Value to display", "None"),
+             ("Title",      "string", "Window title", "''"),
+             ("MaxLines",   "int",    "Truncate after N lines", "500"),
+             ("Wrap",       "bool",   "Word wrap", "True"),
+             ("Monospace",  "bool",   "Monospace font", "True"),
+             ("Highlight",  "string", "Keyword to highlight", "''"),
+         ],
+         "outputs": [
+             ("Text",   "string", "The displayed text"),
+             ("Length", "int",    "Character count"),
+             ("Lines",  "int",    "Line count"),
+         ]},
+
+        {"name": "Preview JSON",
+         "color": "#8A7A4A",
+         "kind": "preview_json",
+         "description":
+             "**Show a JSON value as an indented tree.**\n\n"
+             "Accepts any JSON-serialisable object.  Falls back to "
+             "repr() when serialisation fails.\n\n"
+             "Outputs the pretty-printed text and the top-level keys.",
+         "inputs": [
+             ("Source",   "any",    "Any value", "None"),
+             ("Title",    "string", "Window title", "''"),
+             ("Indent",   "int",    "Indent width", "2"),
+             ("Sort",     "bool",   "Sort keys alphabetically", "False"),
+             ("MaxDepth", "int",    "Truncate deeper than N", "20"),
+         ],
+         "outputs": [
+             ("Text",   "string", "Pretty-printed JSON"),
+             ("Valid",  "bool",   "True if JSON-serialisable"),
+             ("Keys",   "any",    "Top-level keys"),
+             ("Length", "int",    "Character count"),
+         ]},
+
+        {"name": "Preview Plot",
+         "color": "#8A7A4A",
+         "kind": "preview_plot",
+         "description":
+             "**Plot X and Y with matplotlib.**\n\n"
+             "Kind is one of line, bar, scatter, hist, pie, "
+             "step, fill.  Renders to a temp PNG and shows it "
+             "using the same viewer as Preview Image.\n\n"
+             "Outputs the path and min/max of each axis.",
+         "inputs": [
+             ("X",        "any",    "X values or labels", "None"),
+             ("Y",        "any",    "Y values", "None"),
+             ("Kind",     "string", "line | bar | scatter | hist | pie", "'line'"),
+             ("Title",    "string", "Plot title", "''"),
+             ("Xlabel",   "string", "X axis label", "''"),
+             ("Ylabel",   "string", "Y axis label", "''"),
+             ("Color",    "string", "Line / marker colour", "'#E08C4A'"),
+             ("FigsizeW", "float",  "Figure width (inches)", "8.0"),
+             ("FigsizeH", "float",  "Figure height (inches)", "5.0"),
+         ],
+         "outputs": [
+             ("Path",   "string", "Path to the rendered PNG"),
+             ("Points", "int",    "Number of data points"),
+             ("XMin",   "float",  "Minimum X"),
+             ("XMax",   "float",  "Maximum X"),
+             ("YMin",   "float",  "Minimum Y"),
+             ("YMax",   "float",  "Maximum Y"),
+         ]},
+
+        {"name": "Preview HTML",
+         "color": "#8A7A4A",
+         "kind": "preview_html",
+         "description":
+             "**Render HTML in a scrollable window.**\n\n"
+             "Accepts an HTML string.  Useful for quick reports.",
+         "inputs": [
+             ("Source", "string", "HTML markup", "''"),
+             ("Title",  "string", "Window title", "''"),
+             ("Height", "int",    "Window height in pixels", "400"),
+         ],
+         "outputs": [
+             ("Rendered", "bool", "True if rendered"),
+         ]},
+
+        {"name": "Preview Markdown",
+         "color": "#8A7A4A",
+         "kind": "preview_markdown",
+         "description":
+             "**Render Markdown in a scrollable window.**\n\n"
+             "Accepts a Markdown string.  Uses Qt's built-in "
+             "Markdown renderer.",
+         "inputs": [
+             ("Source", "string", "Markdown text", "''"),
+             ("Title",  "string", "Window title", "''"),
+             ("Height", "int",    "Window height in pixels", "400"),
+         ],
+         "outputs": [
+             ("Rendered", "bool", "True if rendered"),
+         ]},
+    ]),
+])
+
 
 _BUILTIN_TEMPLATES = _copy.deepcopy(NODE_TEMPLATES)
 
@@ -6640,16 +7200,202 @@ class MainWindow(QMainWindow):
     def _handle_media(self, nid, payload):
         try:
             info = json.loads(payload)
-            kind = info.get("kind", "")
-            path = info.get("path", "")
         except Exception:
             return
-        if not path or not os.path.isfile(path):
-            return
-        if kind == "image":
-            self._show_image_dialog(nid, path)
+        kind = info.get("kind", "")
+        path = info.get("path", "")
+
+        if kind in ("image", "plot"):
+            if path and os.path.isfile(path):
+                self._show_image_dialog(nid, path)
         elif kind in ("audio", "video"):
-            self._show_media_player(nid, path, kind)
+            if path and os.path.isfile(path):
+                self._show_media_player(nid, path, kind)
+        elif kind == "folder":
+            self._show_folder_dialog(nid, info)
+        elif kind == "table":
+            self._show_table_dialog(nid, info)
+        elif kind == "text":
+            self._show_text_dialog(nid, info)
+        elif kind == "json":
+            self._show_text_dialog(nid, info, mono=True)
+        elif kind in ("html", "markdown"):
+            self._show_html_dialog(nid, info)
+
+    # ---- new preview dialogs ---- #
+
+    def _show_folder_dialog(self, nid, info):
+        from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                     QLabel, QTableWidget,
+                                     QTableWidgetItem, QPushButton)
+        folder = info.get("folder", "")
+        files = info.get("files", []) or []
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Folder \u2014 %s" % nid)
+        dlg.resize(880, 600)
+        dlg.setStyleSheet(
+            "QDialog{background:#202020;color:#DDD;}"
+            "QTableWidget{background:#141414;color:#DDD;"
+            " border:1px solid #2A2A2A;gridline-color:#2A2A2A;}"
+            "QHeaderView::section{background:#2A2A2A;color:#DDD;"
+            " padding:4px;border:0;}"
+            "QPushButton{background:#3C3C3C;color:#EEE;"
+            " border:1px solid #555;padding:5px 14px;border-radius:3px;}")
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(12, 12, 12, 12)
+        head = QLabel("%d file(s) in %s" % (len(files), folder))
+        head.setStyleSheet("font-weight:600;color:#F0F0F0;")
+        v.addWidget(head)
+        tbl = QTableWidget(len(files), 3)
+        tbl.setHorizontalHeaderLabels(["Name", "Size", "Modified"])
+        tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+        import os as _os
+        import time as _t
+        for i, p in enumerate(files):
+            try:
+                size = _os.path.getsize(p)
+                mtime = _t.strftime("%Y-%m-%d %H:%M",
+                                    _t.localtime(_os.path.getmtime(p)))
+            except Exception:
+                size, mtime = 0, ""
+            tbl.setItem(i, 0, QTableWidgetItem(_os.path.basename(p)))
+            tbl.setItem(i, 1, QTableWidgetItem(str(size)))
+            tbl.setItem(i, 2, QTableWidgetItem(mtime))
+        tbl.resizeColumnsToContents()
+        v.addWidget(tbl, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b = QPushButton("Close")
+        b.clicked.connect(dlg.accept)
+        row.addWidget(b)
+        v.addLayout(row)
+        if not hasattr(self, "_media_dialogs"):
+            self._media_dialogs = []
+        self._media_dialogs.append(dlg)
+        dlg.show()
+        dlg.raise_()
+
+    def _show_table_dialog(self, nid, info):
+        from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                     QLabel, QTableWidget,
+                                     QTableWidgetItem, QPushButton)
+        cols = info.get("cols", []) or []
+        rows = info.get("rows", []) or []
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Table \u2014 %s" % (info.get("title") or nid))
+        dlg.resize(880, 600)
+        dlg.setStyleSheet(
+            "QDialog{background:#202020;color:#DDD;}"
+            "QTableWidget{background:#141414;color:#DDD;"
+            " border:1px solid #2A2A2A;gridline-color:#2A2A2A;}"
+            "QHeaderView::section{background:#2A2A2A;color:#DDD;"
+            " padding:4px;border:0;}"
+            "QPushButton{background:#3C3C3C;color:#EEE;"
+            " border:1px solid #555;padding:5px 14px;border-radius:3px;}")
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(12, 12, 12, 12)
+        head = QLabel("%d x %d" % (len(rows), len(cols)))
+        head.setStyleSheet("font-weight:600;color:#F0F0F0;")
+        v.addWidget(head)
+        tbl = QTableWidget(len(rows), len(cols))
+        tbl.setHorizontalHeaderLabels([str(c) for c in cols])
+        if not info.get("editable", False):
+            tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+        for i, row in enumerate(rows):
+            for j, val in enumerate(row[:len(cols)]):
+                tbl.setItem(i, j, QTableWidgetItem(str(val)))
+        tbl.resizeColumnsToContents()
+        v.addWidget(tbl, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b = QPushButton("Close")
+        b.clicked.connect(dlg.accept)
+        row.addWidget(b)
+        v.addLayout(row)
+        if not hasattr(self, "_media_dialogs"):
+            self._media_dialogs = []
+        self._media_dialogs.append(dlg)
+        dlg.show()
+        dlg.raise_()
+
+    def _show_text_dialog(self, nid, info, mono=True):
+        from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                     QLabel, QTextEdit, QPushButton)
+        text = info.get("text", "")
+        title = info.get("title") or nid
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Text \u2014 %s" % title)
+        dlg.resize(880, 600)
+        dlg.setStyleSheet(
+            "QDialog{background:#202020;color:#DDD;}"
+            "QTextEdit{background:#141414;color:#DDD;"
+            " border:1px solid #2A2A2A;padding:8px;}"
+            "QPushButton{background:#3C3C3C;color:#EEE;"
+            " border:1px solid #555;padding:5px 14px;border-radius:3px;}")
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(12, 12, 12, 12)
+        head = QLabel("%d characters, %d lines"
+                      % (len(text), text.count("\n") + 1))
+        head.setStyleSheet("font-weight:600;color:#F0F0F0;")
+        v.addWidget(head)
+        te = QTextEdit()
+        te.setPlainText(text)
+        if mono:
+            te.setStyleSheet(
+                "background:#141414;color:#DDD;border:1px solid #2A2A2A;"
+                "font-family:'JetBrains Mono','Consolas',monospace;"
+                "font-size:12px;padding:8px;")
+        v.addWidget(te, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b = QPushButton("Close")
+        b.clicked.connect(dlg.accept)
+        row.addWidget(b)
+        v.addLayout(row)
+        if not hasattr(self, "_media_dialogs"):
+            self._media_dialogs = []
+        self._media_dialogs.append(dlg)
+        dlg.show()
+        dlg.raise_()
+
+    def _show_html_dialog(self, nid, info):
+        from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                     QTextBrowser, QPushButton)
+        text = info.get("text", "")
+        title = info.get("title") or nid
+        h = int(info.get("height", 400))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("HTML \u2014 %s" % title)
+        dlg.resize(880, max(300, h))
+        dlg.setStyleSheet(
+            "QDialog{background:#202020;}"
+            "QTextBrowser{background:#141414;color:#DDD;"
+            " border:1px solid #2A2A2A;padding:8px;}"
+            "QPushButton{background:#3C3C3C;color:#EEE;"
+            " border:1px solid #555;padding:5px 14px;border-radius:3px;}")
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(12, 12, 12, 12)
+        te = QTextBrowser()
+        kind = info.get("kind", "html")
+        if kind == "markdown":
+            try:
+                te.setMarkdown(text)
+            except Exception:
+                te.setHtml(text)
+        else:
+            te.setHtml(text)
+        v.addWidget(te, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b = QPushButton("Close")
+        b.clicked.connect(dlg.accept)
+        row.addWidget(b)
+        v.addLayout(row)
+        if not hasattr(self, "_media_dialogs"):
+            self._media_dialogs = []
+        self._media_dialogs.append(dlg)
+        dlg.show()
+        dlg.raise_()
 
     def _show_image_dialog(self, nid, path):
         from PyQt5.QtGui import QPixmap
@@ -7208,6 +7954,114 @@ class MainWindow(QMainWindow):
                 L.append("%s    _f.write(%s)" % (pad, _c))
                 L.append("%s%s = None" % (pad, var))
                 return L, miss
+            if kind == "preview_image":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_image(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
+                L.append("%s    title=%s," % (pad, B.get("Title") or "''"))
+                L.append("%s    scale=%s," % (pad, B.get("Scale") or "1.0"))
+                L.append("%s    width=%s," % (pad, B.get("Width") or "0"))
+                L.append("%s    height=%s," % (pad, B.get("Height") or "0"))
+                L.append("%s    grid=%s," % (pad, B.get("Grid") or "False"))
+                L.append("%s    normalize=%s)" % (pad, B.get("Normalize") or "True"))
+                return L, miss
+            if kind == "preview_audio":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_audio(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
+                L.append("%s    title=%s," % (pad, B.get("Title") or "''"))
+                L.append("%s    autoplay=%s," % (pad, B.get("Autoplay") or "True"))
+                L.append("%s    loop=%s," % (pad, B.get("Loop") or "False"))
+                L.append("%s    volume=%s," % (pad, B.get("Volume") or "1.0"))
+                L.append("%s    start=%s)" % (pad, B.get("Start") or "0.0"))
+                return L, miss
+            if kind == "preview_video":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_video(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
+                L.append("%s    title=%s," % (pad, B.get("Title") or "''"))
+                L.append("%s    autoplay=%s," % (pad, B.get("Autoplay") or "True"))
+                L.append("%s    loop=%s," % (pad, B.get("Loop") or "False"))
+                L.append("%s    start=%s," % (pad, B.get("Start") or "0.0"))
+                L.append("%s    end=%s," % (pad, B.get("End") or "0.0"))
+                L.append("%s    muted=%s)" % (pad, B.get("Muted") or "False"))
+                return L, miss
+            if kind == "preview_folder":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_folder(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    source=%s," % (pad, B.get("Source") or "'.'"))
+                L.append("%s    filter=%s," % (pad, B.get("Filter") or "'*'"))
+                L.append("%s    recursive=%s," % (pad, B.get("Recursive") or "False"))
+                L.append("%s    columns=%s," % (pad, B.get("Columns") or "0"))
+                L.append("%s    thumb_size=%s," % (pad, B.get("ThumbSize") or "128"))
+                L.append("%s    sort=%s)" % (pad, B.get("Sort") or "'name'"))
+                return L, miss
+            if kind == "preview_table":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_table(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
+                L.append("%s    title=%s," % (pad, B.get("Title") or "''"))
+                L.append("%s    max_rows=%s," % (pad, B.get("MaxRows") or "100"))
+                L.append("%s    max_cols=%s," % (pad, B.get("MaxCols") or "20"))
+                L.append("%s    editable=%s)" % (pad, B.get("Editable") or "False"))
+                return L, miss
+            if kind == "preview_text":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_text(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
+                L.append("%s    title=%s," % (pad, B.get("Title") or "''"))
+                L.append("%s    max_lines=%s," % (pad, B.get("MaxLines") or "500"))
+                L.append("%s    wrap=%s," % (pad, B.get("Wrap") or "True"))
+                L.append("%s    monospace=%s," % (pad, B.get("Monospace") or "True"))
+                L.append("%s    highlight=%s)" % (pad, B.get("Highlight") or "''"))
+                return L, miss
+            if kind == "preview_json":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_json(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
+                L.append("%s    title=%s," % (pad, B.get("Title") or "''"))
+                L.append("%s    indent=%s," % (pad, B.get("Indent") or "2"))
+                L.append("%s    sort=%s," % (pad, B.get("Sort") or "False"))
+                L.append("%s    max_depth=%s)" % (pad, B.get("MaxDepth") or "20"))
+                return L, miss
+            if kind == "preview_plot":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_plot(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    x=%s," % (pad, B.get("X") or "None"))
+                L.append("%s    y=%s," % (pad, B.get("Y") or "None"))
+                L.append("%s    kind=%s," % (pad, B.get("Kind") or "'line'"))
+                L.append("%s    title=%s," % (pad, B.get("Title") or "''"))
+                L.append("%s    xlabel=%s," % (pad, B.get("Xlabel") or "''"))
+                L.append("%s    ylabel=%s," % (pad, B.get("Ylabel") or "''"))
+                L.append("%s    color=%s," % (pad, B.get("Color") or "'#E08C4A'"))
+                L.append("%s    figsize_w=%s," % (pad, B.get("FigsizeW") or "8.0"))
+                L.append("%s    figsize_h=%s)" % (pad, B.get("FigsizeH") or "5.0"))
+                return L, miss
+            if kind == "preview_html":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_html(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    source=%s," % (pad, B.get("Source") or "''"))
+                L.append("%s    title=%s," % (pad, B.get("Title") or "''"))
+                L.append("%s    height=%s)" % (pad, B.get("Height") or "400"))
+                return L, miss
+            if kind == "preview_markdown":
+                _nid = n.metadata.get("id") or n.title
+                L.append("%s%s = runtime.preview_markdown(" % (pad, var))
+                L.append("%s    %r," % (pad, _nid))
+                L.append("%s    source=%s," % (pad, B.get("Source") or "''"))
+                L.append("%s    title=%s," % (pad, B.get("Title") or "''"))
+                L.append("%s    height=%s)" % (pad, B.get("Height") or "400"))
+                return L, miss
+
             if kind in ("image_viewer", "audio_player", "video_player"):
                 _nid = n.metadata.get("id") or n.title
                 _k = {"image_viewer": "image",
@@ -8373,6 +9227,17 @@ class _NodeRegistrar:
         return False
 
     def clear(self):
+        # Snapshot categories added via NODE_TEMPLATES.extend() at
+        # module load time.  _register_builtins and _register_roles
+        # do not re-add them, so without this save they vanish the
+        # moment the wipe below runs.  Preview is currently the
+        # only such category.
+        _EXTEND_CATS = ("Preview",)
+        _saved_extra = []
+        for _cat, _tpls in NODE_TEMPLATES:
+            if _cat in _EXTEND_CATS:
+                _saved_extra.append((_cat, list(_tpls)))
+
         NODE_TEMPLATES.clear()
         _TEMPLATE_BY_NAME.clear()
         try:
@@ -8380,11 +9245,17 @@ class _NodeRegistrar:
             _register_roles(self._api)
         except Exception as _ex:
             print("[roles] restore failed:", _ex)
-        # restore the built-in stdlib nodes so they survive a wipe
         try:
             _register_builtins(self._api)
         except Exception as _ex:
             print("[builtins] restore failed:", _ex)
+
+        # Re-add the saved categories and index them by name.
+        for _cat, _tpls in _saved_extra:
+            NODE_TEMPLATES.append((_cat, _tpls))
+            for _t in _tpls:
+                _TEMPLATE_BY_NAME[_t["name"]] = _t
+
         self._api.window.library.refresh()
 
     def builtin(self):
