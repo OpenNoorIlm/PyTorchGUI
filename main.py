@@ -3,7 +3,7 @@
 # Data file:  main.db
 # Format:     db
 # Source:     torch 2.14.0+cpu (/home/bismillah/.local/lib/python3.10/site-packages/torch/__init__.py)
-# Date:       2026-09-18 19:07:22
+# Date:       2026-09-19 12:25:46
 # Nodes:      33515
 #
 # The specs live in main.db, not in this file.  Regenerate the
@@ -101,7 +101,7 @@ except Exception as _e:
     print("[builtins] restore failed:", _e)
 
 
-SPECS = _load_specs('data/main.json', 'data/main.db')
+SPECS = _load_specs('main.json', 'main.db')
 for _s in SPECS:
     _s["on_exists"] = "keep"
 n_ok, n_bad = api.register.node.bulk(SPECS)

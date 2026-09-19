@@ -316,6 +316,11 @@ def _build_parser():
         "--quiet", action="store_true",
         help="suppress progress output",
     )
+    p.add_argument(
+        "--loader-only", dest="loader_only", action="store_true",
+        help="skip the walk; only re-emit the loader main.py using "
+             "metadata already present in main.db / main.json.  Fast.",
+    )
     return p
 
 
@@ -1221,12 +1226,130 @@ def emit_db(specs, out_file, db_path,
 #  Main                                                          #
 # ============================================================== #
 
+def _read_db_metadata(path):
+    """Return the metadata table from a PyTorchUI db as a dict.
+
+    Empty dict if the file is missing or malformed — the caller
+    falls back to defaults.
+    """
+    if not os.path.isfile(path):
+        return {}
+    try:
+        con = sqlite3.connect(path)
+        try:
+            rows = con.execute(
+                "SELECT key, value FROM metadata").fetchall()
+        finally:
+            con.close()
+        return {str(k): str(v) for k, v in rows}
+    except Exception:
+        return {}
+
+
+def _read_json_metadata(path):
+    """Return the top-level metadata from a PyTorchUI json dump."""
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return {
+            "torch_version": str(d.get("torch_version", "n/a")),
+            "torch_path":    str(d.get("torch_path", "n/a")),
+            "node_count":    str(d.get("node_count", 0)),
+        }
+    except Exception:
+        return {}
+
+
+def emit_loader_only(out_file, data_file, data_format,
+                     version, path, node_count,
+                     json_path=None, db_path=None):
+    """Emit just the loader main.py, no walking, no package imports.
+
+    For format=db   the loader tries main.json first, then main.db.
+    For format=json the loader tries the given json path, then the
+                    default db path.
+    """
+    date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # The loader template already substitutes both fallback paths.
+    # For db output, we leave the json fallback at its default.
+    _json = json_path if json_path is not None else JSON_FILE
+    _db   = db_path if db_path is not None else DB_FILE
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        header = (HEADER_LOADER
+                  .replace("{json_path!r}", repr(_json))
+                  .replace("{db_path!r}",   repr(_db))
+                  .replace("{data_file}",   data_file)
+                  .replace("{data_format}", data_format)
+                  .replace("{version}",     version)
+                  .replace("{torch_path}",  path)
+                  .replace("{date}",        date)
+                  .replace("{node_count}",  str(node_count)))
+        f.write(header)
+        f.write(FOOTER)
+    return out_file
+
+
 def main(argv=None):
     warnings.filterwarnings("ignore")
     parser = _build_parser()
     args = parser.parse_args(argv)
 
     fmt = _resolve_format(args)
+
+    # ---- fast path: emit only the loader, no walk ---- #
+    if getattr(args, "loader_only", False):
+        if fmt == "py":
+            print("! --loader-only requires --db or --json")
+            sys.exit(2)
+
+        # Read metadata from whichever data file we already have.
+        meta = {}
+        if fmt == "db":
+            meta = _read_db_metadata(args.db_path)
+            if not meta:
+                meta = _read_json_metadata(args.json_path)
+            data_file = args.db_path
+            json_path = args.json_path
+            db_path   = args.db_path
+        else:
+            meta = _read_json_metadata(args.json_path)
+            if not meta:
+                meta = _read_db_metadata(args.db_path)
+            data_file = args.json_path
+            json_path = args.json_path
+            db_path   = args.db_path
+
+        if not meta:
+            print("! no existing %s found; run a full build first"
+                  % (data_file,))
+            sys.exit(1)
+
+        version    = meta.get("torch_version", "n/a")
+        path       = meta.get("torch_path",    "n/a")
+        node_count = meta.get("node_count",    "0")
+
+        emit_loader_only(
+            out_file=args.out_file,
+            data_file=data_file,
+            data_format=fmt,
+            version=version,
+            path=path,
+            node_count=node_count,
+            json_path=json_path,
+            db_path=db_path,
+        )
+
+        if not args.quiet:
+            print("output format:", fmt, "(loader-only)")
+            print("data file:    ", data_file)
+            print("nodes:        ", node_count)
+            print("Wrote", args.out_file)
+        return
+
     cap_map = _parse_cap_libs(args.cap_libs)
 
     extra_libs = _flatten_libraries(args.libraries)

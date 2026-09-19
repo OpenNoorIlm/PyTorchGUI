@@ -44,7 +44,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QGraphicsView,
                              QTreeWidget, QTreeWidgetItem, QFileDialog,
                              QMessageBox, QAction, QWidgetAction, QStatusBar,
                              QToolBar, QShortcut, QDockWidget, QTextEdit,
-                             QTextBrowser, QDialog)
+                             QTextBrowser, QDialog,
+                             QListWidget, QListWidgetItem,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -800,6 +802,57 @@ def _save_settings(data):
     except Exception as ex:
         print("[settings] save failed:", ex)
         return False
+
+# ---------------------------------------------------------------- #
+#  Output path settings                                            #
+# ---------------------------------------------------------------- #
+#
+# These are stored in ~/.pytorchui.json alongside the rest of the
+# settings.  They are read on boot by MainWindow.__init__ and used
+# by _generate_code_to_file and save_graph_as.
+#
+# main.py does NOT know about these.  main.py is a generated loader;
+# create.py overwrites it on every `--db` run.  The state and the
+# menu live here, in Nodes.py, which create.py never touches.
+
+_OUTPUT_PATHS = {
+    "generated_py": "",     # where Ctrl+G writes generated.py
+    "graph_export": "",     # default dir for Save As...
+    "db_output":    "",     # default dir for the Convert dialog
+}
+
+
+def _load_output_paths():
+    try:
+        data = _load_settings()
+        p = data.get("paths", {}) or {}
+        for k in _OUTPUT_PATHS:
+            _OUTPUT_PATHS[k] = str(p.get(k, "") or "")
+    except Exception as ex:
+        print("[paths] load failed:", ex)
+
+
+def _save_output_paths():
+    try:
+        data = _load_settings()
+        data.setdefault("paths", {})
+        for k, v in _OUTPUT_PATHS.items():
+            data["paths"][k] = v
+        _save_settings(data)
+    except Exception as ex:
+        print("[paths] save failed:", ex)
+
+
+def _output_dir(kind, fallback=""):
+    """Return the configured folder for `kind`, or fallback.
+
+    kind is one of "generated_py", "graph_export", "db_output".
+    """
+    p = _OUTPUT_PATHS.get(kind, "")
+    if p and os.path.isdir(p):
+        return p
+    return fallback or os.getcwd()
+
 
 
 def _apply_settings(data):
@@ -4590,6 +4643,15 @@ class MainWindow(QMainWindow):
                 act.triggered.connect(
                     lambda checked=False, t=tpl: self._add_template_at_cursor(t))
 
+        m = mb.addMenu("Tools")
+        self._act(m, "Convert Python project\u2026", None,
+                  self._open_convert_dialog_menu)
+        m.addSeparator()
+        self._act(m, "Show output paths", None,
+                  self._show_output_paths)
+        self._act(m, "Clear output paths", None,
+                  self._clear_output_paths)
+
         m = mb.addMenu("Examples")
         self._act(m, "Browse Examples…", "Ctrl+E", self._pick_example)
         m.addSeparator()
@@ -4671,6 +4733,49 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.report("Home", "info", 1200)
+
+
+    # ---- Convert dialog ---- #
+
+    def _open_convert_dialog_menu(self):
+        python = _output_dir("python", "") or sys.executable
+        default_out = _output_dir("db_output", os.getcwd())
+        self._open_convert_dialog(python, "", default_out)
+
+    def _open_convert_dialog(self, python, folder, default_out=""):
+        dlg = ConvertDialog(self, python=python,
+                            default_folder=folder,
+                            default_out=default_out)
+        dlg.exec_()
+
+
+
+    # ---- Output Paths pickers ---- #
+
+    def _pick_output_path(self, key):
+        start = _OUTPUT_PATHS.get(key, "") or os.path.expanduser("~")
+        path = QFileDialog.getExistingDirectory(
+            self, "Choose folder", start)
+        if not path:
+            return
+        _OUTPUT_PATHS[key] = path
+        _save_output_paths()
+        self.report("%s -> %s" % (key, path), "success", 2500)
+
+    def _clear_output_paths(self):
+        for k in _OUTPUT_PATHS:
+            _OUTPUT_PATHS[k] = ""
+        _save_output_paths()
+        self.report("Output paths cleared", "info", 2000)
+
+    def _show_output_paths(self):
+        lines = [
+            "generated.py:  %s" % (_OUTPUT_PATHS["generated_py"] or "(cwd)"),
+            "graph export:  %s" % (_OUTPUT_PATHS["graph_export"] or "(ask)"),
+            "database out:  %s" % (_OUTPUT_PATHS["db_output"] or "(cwd)"),
+        ]
+        QMessageBox.information(self, "Output Paths", "\n".join(lines))
+
 
     def _build_status_bar(self):
         sb = QStatusBar()
@@ -4779,7 +4884,11 @@ class MainWindow(QMainWindow):
             return False
 
     def save_graph_as(self):
-        start = self._current_path or "graph.json"
+        if self._current_path:
+            start = self._current_path
+        else:
+            _out_dir = _output_dir("graph_export", os.getcwd())
+            start = os.path.join(_out_dir, "graph.json")
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Graph", start,
             "Node Graph (*.json);;All Files (*)")
@@ -4947,6 +5056,24 @@ class MainWindow(QMainWindow):
 
         now = menu.addAction("Save Now")
         now.triggered.connect(self._autosave_tick)
+
+        menu.addSeparator()
+
+        sub_paths = menu.addMenu("Output Paths")
+        sub_paths.setStyleSheet(MENU_STYLE)
+        for label, key in (
+            ("generated.py folder\u2026", "generated_py"),
+            ("Graph export folder\u2026", "graph_export"),
+            ("Database output folder\u2026", "db_output"),
+        ):
+            act = sub_paths.addAction(label)
+            act.triggered.connect(
+                lambda _c=False, k=key: self._pick_output_path(k))
+        sub_paths.addSeparator()
+        clr = sub_paths.addAction("Clear all")
+        clr.triggered.connect(self._clear_output_paths)
+        show = sub_paths.addAction("Show current")
+        show.triggered.connect(self._show_output_paths)
 
     def _autosave_target(self):
         if self._current_path:
@@ -6004,7 +6131,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------ code + run    #
     def _generate_code_to_file(self):
         import traceback as _tb
-        path = "generated.py"
+        _out_dir = _output_dir("generated_py", os.getcwd())
+        path = os.path.join(_out_dir, "generated.py")
 
         # 1. Run codegen entirely in memory.  If it raises, we do not
         #    touch the existing file until we know what happened.
@@ -9163,6 +9291,373 @@ def _install_nodehost():
         import traceback
         print("[nodehost] install failed:")
         traceback.print_exc()
+
+
+
+# ---------------------------------------------------------------- #
+#  Python project converter                                       #
+# ---------------------------------------------------------------- #
+
+_STDLIB = set(getattr(sys, "stdlib_module_names", ()) or ())
+if not _STDLIB:
+    # Python < 3.10 fallback: hard-coded common stdlib names.
+    _STDLIB = {
+        "abc", "argparse", "ast", "asyncio", "base64", "bisect",
+        "builtins", "calendar", "collections", "concurrent",
+        "configparser", "contextlib", "copy", "csv", "ctypes",
+        "dataclasses", "datetime", "decimal", "difflib", "dis",
+        "email", "enum", "errno", "faulthandler", "fnmatch",
+        "functools", "gc", "getopt", "getpass", "glob", "gzip",
+        "hashlib", "heapq", "hmac", "html", "http", "importlib",
+        "inspect", "io", "ipaddress", "itertools", "json", "keyword",
+        "linecache", "locale", "logging", "lzma", "math", "mimetypes",
+        "multiprocessing", "operator", "os", "pathlib", "pickle",
+        "pkgutil", "platform", "plistlib", "pprint", "profile",
+        "pstats", "py_compile", "queue", "random", "re", "readline",
+        "reprlib", "secrets", "select", "shelve", "shlex", "shutil",
+        "signal", "site", "smtplib", "socket", "socketserver",
+        "sqlite3", "ssl", "stat", "statistics", "string", "stringprep",
+        "struct", "subprocess", "sys", "sysconfig", "tarfile",
+        "tempfile", "textwrap", "threading", "time", "timeit",
+        "tkinter", "token", "tokenize", "traceback", "tracemalloc",
+        "types", "typing", "unicodedata", "unittest", "urllib",
+        "uuid", "venv", "warnings", "wave", "weakref", "webbrowser",
+        "xml", "xmlrpc", "zipfile", "zipimport", "zlib",
+    }
+
+_LOCAL_NAMES = {
+    "helpers", "Nodes", "NodeClasses", "create", "edit", "editGit",
+    "createGit", "main", "examples", "initiate", "start", "test",
+}
+
+
+def _scan_python_folder(folder):
+    """Return (all_imports, per_file, local_names).
+
+    local_names are the top-level package directories and .py file
+    names inside the folder that should be treated as project-local
+    and excluded from the dependency list.
+    """
+    import ast
+    all_imports = set()
+    per_file = {}
+    local_names = set()
+
+    folder = os.path.abspath(folder)
+    for entry in os.listdir(folder):
+        full = os.path.join(folder, entry)
+        if os.path.isdir(full):
+            if os.path.isfile(os.path.join(full, "__init__.py")) or \
+               any(f.endswith(".py") for f in os.listdir(full)):
+                local_names.add(entry)
+        elif entry.endswith(".py"):
+            local_names.add(entry[:-3])
+
+    for dirpath, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs
+                   if d not in (".git", "__pycache__", ".venv",
+                                "venv", "env", "build", "dist",
+                                ".tox", "node_modules")]
+        for f in files:
+            if not f.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, f)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    src = fh.read()
+                tree = ast.parse(src, filename=path)
+            except Exception as ex:
+                per_file[path] = ("error: %s" % ex, [])
+                continue
+            mods = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        mods.add(a.name.split(".")[0])
+                elif isinstance(node, ast.ImportFrom):
+                    if node.level == 0 and node.module:
+                        mods.add(node.module.split(".")[0])
+            mods = {m for m in mods
+                    if m and not m.startswith("_")}
+            per_file[path] = ("ok", sorted(mods))
+            all_imports |= mods
+
+    external = sorted(
+        m for m in all_imports
+        if m not in _STDLIB
+        and m not in _LOCAL_NAMES
+        and m not in local_names
+    )
+    return external, per_file, sorted(local_names)
+
+
+def _check_libs(python, libs):
+    """Return (installed, missing) by probing the interpreter."""
+    installed, missing = [], []
+    for lib in libs:
+        r = subprocess.run(
+            [python, "-c", "import %s" % lib],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=10)
+        (installed if r.returncode == 0 else missing).append(lib)
+    return installed, missing
+
+
+# ---- the dialog --------------------------------------------------- #
+
+class ConvertDialog(QDialog):
+    def __init__(self, parent=None, python="python",
+                 default_folder="", default_out=""):
+        super().__init__(parent)
+        self.setWindowTitle("Convert Python project")
+        self.setModal(True)
+        self.resize(680, 620)
+        self._python = python
+        self._folder = default_folder
+        self._default_out = default_out
+
+        from PyQt5.QtWidgets import QRadioButton, QButtonGroup
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(8)
+
+        # ---- folder row ---- #
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Folder:"))
+        self.edit_folder = QLineEdit(default_folder)
+        self.edit_folder.setPlaceholderText("path to a Python project")
+        row.addWidget(self.edit_folder, 1)
+        b_browse = QPushButton("Browse\u2026")
+        b_browse.clicked.connect(self._pick_folder)
+        row.addWidget(b_browse)
+        v.addLayout(row)
+
+        # ---- python row ---- #
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Python:"))
+        self.edit_python = QLineEdit(python)
+        row.addWidget(self.edit_python, 1)
+        b_choose = QPushButton("Choose\u2026")
+        b_choose.clicked.connect(self._pick_python)
+        row.addWidget(b_choose)
+        v.addLayout(row)
+
+        # ---- output format ---- #
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Output:"))
+        self.rb_db   = QRadioButton("SQLite (.db)")
+        self.rb_json = QRadioButton("JSON (.json)")
+        self.rb_db.setChecked(True)
+        row.addWidget(self.rb_db)
+        row.addWidget(self.rb_json)
+        row.addStretch(1)
+        row.addWidget(QLabel("Path:"))
+        self.edit_out = QLineEdit(default_out)
+        self.edit_out.setPlaceholderText("output file")
+        row.addWidget(self.edit_out, 1)
+        b_out = QPushButton("Browse\u2026")
+        b_out.clicked.connect(self._pick_output)
+        row.addWidget(b_out)
+        v.addLayout(row)
+
+        # ---- libs list ---- #
+        v.addWidget(QLabel("Detected libraries:"))
+        self.list = QListWidget()
+        self.list.setSelectionMode(QListWidget.NoSelection)
+        v.addWidget(self.list, 1)
+
+        # ---- status ---- #
+        self.lbl_status = QLabel("Pick a folder and click Scan.")
+        self.lbl_status.setStyleSheet("color:#8A8A8A;")
+        v.addWidget(self.lbl_status)
+
+        # ---- buttons ---- #
+        row = QHBoxLayout()
+        b_scan = QPushButton("Scan")
+        b_scan.clicked.connect(self._scan)
+        row.addWidget(b_scan)
+        self.b_install = QPushButton("Install missing\u2026")
+        self.b_install.clicked.connect(self._install_missing)
+        self.b_install.setEnabled(False)
+        row.addWidget(self.b_install)
+        self.b_req = QPushButton("Use requirements.txt\u2026")
+        self.b_req.clicked.connect(self._use_requirements)
+        self.b_req.setEnabled(False)
+        row.addWidget(self.b_req)
+        row.addStretch(1)
+        b_cancel = QPushButton("Cancel")
+        b_cancel.clicked.connect(self.reject)
+        row.addWidget(b_cancel)
+        self.b_convert = QPushButton("Convert")
+        self.b_convert.setDefault(True)
+        self.b_convert.setEnabled(False)
+        self.b_convert.clicked.connect(self._convert)
+        row.addWidget(self.b_convert)
+        v.addLayout(row)
+
+        self._external = []
+        self._missing = []
+        self._req_file = ""
+
+    # ---- pickers ---- #
+
+    def _pick_folder(self):
+        from PyQt5.QtWidgets import QFileDialog
+        start = self.edit_folder.text() or os.path.expanduser("~")
+        path = QFileDialog.getExistingDirectory(
+            self, "Choose Python project folder", start)
+        if path:
+            self.edit_folder.setText(path)
+            self._scan()
+
+    def _pick_python(self):
+        from PyQt5.QtWidgets import QFileDialog
+        start = os.path.dirname(self.edit_python.text()) or "/usr/bin"
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose Python interpreter", start, "All Files (*)")
+        if path:
+            self.edit_python.setText(path)
+
+    def _pick_output(self):
+        from PyQt5.QtWidgets import QFileDialog
+        start = self.edit_out.text() or self._default_out or os.getcwd()
+        if self.rb_db.isChecked():
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save database", start, "SQLite (*.db)")
+        else:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save JSON", start, "JSON (*.json)")
+        if path:
+            self.edit_out.setText(path)
+
+    # ---- scan ---- #
+
+    def _scan(self):
+        folder = self.edit_folder.text().strip()
+        if not folder or not os.path.isdir(folder):
+            self.lbl_status.setText("Folder not found.")
+            return
+        self.list.clear()
+        self.lbl_status.setText("Scanning\u2026")
+        QApplication.processEvents()
+
+        try:
+            external, per_file, local = _scan_python_folder(folder)
+        except Exception as ex:
+            self.lbl_status.setText("Scan failed: %s" % ex)
+            return
+
+        self._external = external
+        self._req_file = os.path.join(folder, "requirements.txt")
+        self.b_req.setEnabled(os.path.isfile(self._req_file))
+
+        if not external:
+            self.lbl_status.setText(
+                "No external imports found.  (%d local, %d file(s) scanned)"
+                % (len(local), len(per_file)))
+            self.b_convert.setEnabled(False)
+            self.b_install.setEnabled(False)
+            return
+
+        python = self.edit_python.text().strip() or "python"
+        installed, missing = _check_libs(python, external)
+        self._missing = missing
+
+        for lib in external:
+            mark = "OK " if lib in installed else "MISS"
+            color = "#5CB85C" if lib in installed else "#D9534F"
+            it = QListWidgetItem("[%s]  %s" % (mark, lib))
+            it.setForeground(QColor(color))
+            it.setData(Qt.UserRole, lib)
+            self.list.addItem(it)
+
+        self.b_install.setEnabled(bool(missing))
+        self.b_convert.setEnabled(True)
+        self.lbl_status.setText(
+            "%d external, %d installed, %d missing"
+            % (len(external), len(installed), len(missing)))
+
+    # ---- install ---- #
+
+    def _install_missing(self):
+        if not self._missing:
+            return
+        python = self.edit_python.text().strip() or "python"
+        msg = "Install these with\n\n    %s -m pip install ...\n\n%s" % (
+            python, "\n".join(self._missing))
+        from PyQt5.QtWidgets import QMessageBox
+        if QMessageBox.question(self, "Install", msg) != QMessageBox.Yes:
+            return
+        subprocess.run(
+            [python, "-m", "pip", "install", "--upgrade"] + self._missing)
+        self._scan()
+
+    def _use_requirements(self):
+        if not os.path.isfile(self._req_file):
+            return
+        python = self.edit_python.text().strip() or "python"
+        from PyQt5.QtWidgets import QMessageBox
+        if QMessageBox.question(
+                self, "Install",
+                "Run\n\n    %s -m pip install -r %s\n\n?"
+                % (python, self._req_file)) != QMessageBox.Yes:
+            return
+        subprocess.run(
+            [python, "-m", "pip", "install", "-r", self._req_file])
+        self._scan()
+
+    # ---- convert ---- #
+
+    def _convert(self):
+        folder = self.edit_folder.text().strip()
+        out = self.edit_out.text().strip()
+        if not out:
+            self._pick_output()
+            out = self.edit_out.text().strip()
+        if not out:
+            return
+
+        fmt = "db" if self.rb_db.isChecked() else "json"
+        python = self.edit_python.text().strip() or "python"
+
+        # Build the create.py invocation.  It must be run in the
+        # PyTorchUI root so it can find its own helpers.
+        root = os.path.dirname(os.path.abspath(__file__))
+        while not os.path.isfile(os.path.join(root, "create.py")):
+            parent = os.path.dirname(root)
+            if parent == root:
+                from PyQt5.QtWidgets import QMessageBox
+                QMessageBox.critical(
+                    self, "Convert",
+                    "Could not locate create.py relative to the editor.")
+                return
+            root = parent
+
+        create_py = os.path.join(root, "create.py")
+        args = [python, create_py, "--format", fmt,
+                "--quiet",
+                "--db-path" if fmt == "db" else "--json-path", out,
+                "-o", out + ".loader.py"]
+        for lib in self._external:
+            args.extend(["-l", lib])
+
+        self.lbl_status.setText("Running create.py\u2026")
+        QApplication.processEvents()
+        r = subprocess.run(args)
+        if r.returncode != 0:
+            self.lbl_status.setText("create.py failed (%d)" % r.returncode)
+            return
+
+        self.lbl_status.setText("Wrote %s" % out)
+        from PyQt5.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self, "Convert",
+            "Wrote:\n  %s\n  %s.loader.py" % (out, out))
+        self.accept()
+
+
+
 
 _install_nodehost()
 
