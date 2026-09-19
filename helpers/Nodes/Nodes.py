@@ -1270,6 +1270,16 @@ def _truncate_words(text, limit=100):
     return " ".join(words[:limit]), True
 
 
+
+
+def _safe_nid(node):
+    """Whitespace-free identifier for a node, used in runtime markers."""
+    nid = node.metadata.get("id") if hasattr(node, "metadata") else None
+    if nid:
+        return str(nid)
+    return _safe_var(getattr(node, "title", "node"))
+
+
 def _safe_var(name):
     v = re.sub(r"[^0-9a-zA-Z_]", "_", str(name or "node")).strip("_")
     if not v:
@@ -1762,6 +1772,11 @@ class Node(QGraphicsItem):
         self.output_full = ""
         self.running = False
         self._output_rect = QRectF()
+        self._preview_rect = QRectF()
+        self._preview_info = {}
+        self._preview_kind = ""
+        self._preview_pixmap = None
+        self._preview_lines = []
         self._shell_collapsed = False
         self._block_hovered = False
         self.blocks = []
@@ -1956,6 +1971,73 @@ class Node(QGraphicsItem):
         self.output_full = str(text) if text is not None else ""
         self.update()
 
+    def _is_preview_node(self):
+        k = self.metadata.get("kind", "") or ""
+        return str(k).startswith("preview_")
+
+    def set_preview(self, info):
+        """Store a preview payload and repaint the node body.
+
+        info is the dict emitted by the runtime.preview_*() methods.
+        The 'kind' field decides how the node renders it.
+        """
+        self._preview_info = dict(info or {})
+        self._preview_kind = str(self._preview_info.get("kind", ""))
+        self._preview_pixmap = None
+        self._preview_lines = []
+
+        kind = self._preview_kind
+
+        if kind in ("image", "plot"):
+            path = self._preview_info.get("path", "") or ""
+            if path and os.path.isfile(path):
+                from PyQt5.QtGui import QPixmap
+                pm = QPixmap(path)
+                if not pm.isNull():
+                    self._preview_pixmap = pm
+                    print("[preview] loaded %dx%d from %s"
+                          % (pm.width(), pm.height(), path))
+                else:
+                    print("[preview] QPixmap failed for", path)
+
+        elif kind == "table":
+            cols = self._preview_info.get("cols", []) or []
+            rows = self._preview_info.get("rows", []) or []
+            if cols:
+                self._preview_lines.append(
+                    " | ".join(str(c)[:16] for c in cols))
+                self._preview_lines.append("-" * 40)
+            for r in rows[:10]:
+                self._preview_lines.append(
+                    " | ".join(str(x)[:16] for x in r))
+
+        elif kind in ("text", "json"):
+            text = self._preview_info.get("text", "") or ""
+            self._preview_lines = text.split("\n")[:12]
+
+        elif kind == "folder":
+            n = self._preview_info.get("count", 0)
+            files = self._preview_info.get("files", []) or []
+            self._preview_lines.append("%d file(s)" % n)
+            for p in files[:10]:
+                self._preview_lines.append(os.path.basename(str(p)))
+
+        elif kind in ("html", "markdown"):
+            text = self._preview_info.get("text", "") or ""
+            self._preview_lines = text.split("\n")[:12]
+
+        elif kind in ("audio", "video"):
+            path = self._preview_info.get("path", "") or ""
+            self._preview_lines.append(
+                "%s: %s" % (kind, os.path.basename(path) if path else "(none)"))
+
+        else:
+            self._preview_lines.append("(unknown preview kind: %s)"
+                                       % kind)
+
+        self.layout()
+        self.update()
+
     def set_running(self, running):
         self.running = bool(running)
         self.layout()
@@ -2096,6 +2178,15 @@ class Node(QGraphicsItem):
             shell_h = SECTION_HEIGHT + display_lines * 12 + 8
         self._output_rect = QRectF(0, y, self.width, shell_h)
         y += shell_h
+
+        # Preview area for preview_* nodes.  200px tall when the
+        # node is a preview kind, zero otherwise.  Painted in
+        # Node.paint(); content is filled by set_preview().
+        if self._is_preview_node():
+            self._preview_rect = QRectF(0, y, self.width, 200)
+            y += 200
+        else:
+            self._preview_rect = QRectF()
 
         new_h = max(y + PADDING * 0.5, HEADER_HEIGHT + 12)
         if new_h != self.height:
@@ -2307,6 +2398,48 @@ class Node(QGraphicsItem):
                             fm.elidedText(str(line), Qt.ElideRight,
                                           int(orct.width() - 24)))
                         ty += 12
+
+        # Preview area for preview_* nodes.
+        prv = self._preview_rect
+        if prv.height() > 0:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 190))
+            painter.drawRect(prv)
+            painter.setPen(QPen(QColor(255, 255, 255, 32), 1))
+            painter.drawRect(prv.adjusted(0.5, 0.5, -0.5, -0.5))
+
+            inner = prv.adjusted(6, 6, -6, -6)
+
+            if self._preview_pixmap is not None:
+                pm = self._preview_pixmap
+                scaled = pm.scaled(
+                    int(inner.width()), int(inner.height()),
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                x = inner.left() + (inner.width() - scaled.width()) / 2.0
+                y = inner.top() + (inner.height() - scaled.height()) / 2.0
+                painter.drawPixmap(int(x), int(y), scaled)
+
+            elif self._preview_lines:
+                f = QFont("Segoe UI", 8)
+                painter.setFont(f)
+                fm = QFontMetrics(f)
+                ty = inner.top() + 2
+                for line in self._preview_lines:
+                    if ty + 12 > inner.bottom():
+                        break
+                    painter.setPen(QColor(220, 220, 220))
+                    painter.drawText(
+                        QRectF(inner.left(), ty, inner.width(), 12),
+                        Qt.AlignVCenter | Qt.AlignLeft,
+                        fm.elidedText(str(line), Qt.ElideRight,
+                                      int(inner.width())))
+                    ty += 12
+
+            else:
+                painter.setPen(QColor(120, 120, 120))
+                painter.setFont(QFont("Segoe UI", 9))
+                painter.drawText(inner, Qt.AlignCenter,
+                                 "(no preview yet)")
 
         if self.running:
             painter.setBrush(Qt.NoBrush)
@@ -2527,10 +2660,25 @@ def build_node_from_template(template):
                 n.add_output(sock_name, sock_type, sock_desc,
                              sock_options)
     n.metadata["template"] = template["name"]
+    if template.get("kind"):
+        n.metadata["kind"] = template["kind"]
     try:
         n.after_template_built(template)
     except Exception as _ex:
         print("[nodeclass] after_template_built:", _ex)
+
+    # Preview nodes get a manual "show full preview" button.
+    _kind = str(template.get("kind", "") or "")
+    if _kind.startswith("preview_"):
+        try:
+            n.add_button(
+                "\U0001F50D",   # magnifying glass
+                on_click=n._show_preview_button,
+                tooltip="Show the full preview in a window",
+                anchor=ANCHOR_HEADER, w=26, h=18)
+        except Exception as _ex:
+            print("[preview] could not add show button:", _ex)
+
     if template.get("flow", True):
         n.add_flow_sockets()
     return n
@@ -3380,6 +3528,101 @@ NODE_TEMPLATES.extend([
     ]),
 ])
 
+
+
+
+# ---------------------------------------------------------------- #
+#  Normalise shorthand templates                                     #
+# ---------------------------------------------------------------- #
+#
+# register_node() converts inputs=[...] / outputs=[...] shorthand
+# into the canonical "sections" form before appending to
+# NODE_TEMPLATES.  Templates added directly with
+# NODE_TEMPLATES.extend() never go through that step, so they land
+# with the shorthand still attached.
+#
+# build_node_from_template() only understands "sections".  This
+# helper walks every template once and normalises whatever is still
+# in shorthand form, so both registration paths end up identical.
+
+def _normalize_extended_templates():
+    for _cat, _tpls in NODE_TEMPLATES:
+        for _t in _tpls:
+            if "sections" in _t:
+                continue
+            _secs = []
+            for _key, _dir in (("inputs", "in"), ("outputs", "out")):
+                _list = _t.pop(_key, None) or []
+                if not _list:
+                    continue
+                _norm = []
+                for _e in _list:
+                    if len(_e) >= 3 and _e[2] in ("in", "out"):
+                        _norm.append(tuple(_e))
+                        continue
+                    _name = _e[0] if len(_e) > 0 else ""
+                    _type = _e[1] if len(_e) > 1 else "any"
+                    _desc = _e[2] if len(_e) > 2 else ""
+                    _def  = _e[3] if len(_e) > 3 else None
+                    _opts = _e[4] if len(_e) > 4 else None
+                    _norm.append((_name, _type, _dir, _desc, _def, _opts))
+                _secs.append(
+                    ("Inputs" if _dir == "in" else "Outputs", _norm, ""))
+            _t["sections"] = _secs
+
+
+_normalize_extended_templates()
+
+
+
+
+# ---------------------------------------------------------------- #
+#  Deduplicate NODE_TEMPLATES by name                                #
+# ---------------------------------------------------------------- #
+#
+# Multiple patches may have added templates with the same name.
+# find_template() returns the first match, which is the oldest; the
+# one we want is the newest.  This collapses the list so each name
+# appears once, keeping the last occurrence.
+
+def _dedupe_templates():
+    seen = {}
+    for _cat, _tpls in NODE_TEMPLATES:
+        for _t in _tpls:
+            seen[_t["name"]] = _t
+    removed = 0
+    new_list = []
+    for _cat, _tpls in NODE_TEMPLATES:
+        kept = []
+        for _t in _tpls:
+            if seen.get(_t["name"]) is _t:
+                kept.append(_t)
+            else:
+                removed += 1
+        if kept:
+            new_list.append((_cat, kept))
+    NODE_TEMPLATES[:] = new_list
+    return removed
+
+
+_dedupe_templates()
+
+
+
+NODE_TEMPLATES.extend([
+    ("Built-ins/IO", [
+        {"name": "Import PyTorchUI JSON",
+         "color": "#5A5A5A",
+         "kind": "pyui_json",
+         "description":
+             "**Read a PyTorchUI graph file (or any JSON) and "
+             "return the parsed dict.**",
+         "inputs": [("Path", "string", "Path to a .json file",
+                     "'graph.json'")],
+         "outputs": [("Result", "any",
+                      "Parsed dict from the file")]},
+    ]),
+])
 
 _BUILTIN_TEMPLATES = _copy.deepcopy(NODE_TEMPLATES)
 
@@ -5088,6 +5331,126 @@ class _RunThread(QThread):
 #  Main window                                                                #
 # --------------------------------------------------------------------------- #
 
+
+# ---------------------------------------------------------------- #
+#  Undo / redo                                                      #
+# ---------------------------------------------------------------- #
+
+class _UndoManager(QObject):
+    """Snapshot-based undo stack for a NodeScene.
+
+    A snapshot is scene.to_dict() — the same JSON that File > Save
+    produces.  Every structural change pushes one.  Undo loads the
+    previous snapshot; redo loads the next.  Node item identity is
+    not preserved across an undo (the scene is rebuilt), but node
+    ids, positions, metadata, and edges all survive.
+    """
+
+    LIMIT = 200
+
+    def __init__(self, scene, parent=None):
+        super().__init__(parent)
+        self.scene = scene
+        self._undo = []
+        self._redo = []
+        self._last = None
+        self._restoring = False
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(400)
+        self._timer.timeout.connect(self._capture)
+        scene.graph_changed.connect(self._on_changed)
+        self._capture_now()
+
+    # ---- internal ---- #
+
+    def _on_changed(self):
+        if self._restoring:
+            return
+        self._timer.start()
+
+    def _capture_now(self):
+        try:
+            self._last = self.scene.to_dict()
+        except Exception:
+            self._last = None
+
+    def _capture(self):
+        try:
+            snap = self.scene.to_dict()
+        except Exception:
+            return
+        if snap == self._last:
+            return
+        if self._last is not None:
+            self._undo.append(self._last)
+            if len(self._undo) > self.LIMIT:
+                self._undo.pop(0)
+        self._last = snap
+        self._redo.clear()
+
+    def _flush(self):
+        """Commit any pending change before an undo/redo."""
+        if self._timer.isActive():
+            self._timer.stop()
+            self._capture()
+
+    # ---- public ---- #
+
+    def clear(self):
+        self._undo.clear()
+        self._redo.clear()
+        self._capture_now()
+
+    def undo(self):
+        self._flush()
+        if not self._undo:
+            return 0
+        prev = self._undo.pop()
+        if self._last is not None:
+            self._redo.append(self._last)
+        self._restoring = True
+        try:
+            self.scene.load_from_dict(prev)
+        except Exception as ex:
+            print("[undo] restore failed:", ex)
+            return 0
+        finally:
+            self._restoring = False
+        self._last = prev
+        return len(self._undo)
+
+    def redo(self):
+        self._flush()
+        if not self._redo:
+            return 0
+        nxt = self._redo.pop()
+        if self._last is not None:
+            self._undo.append(self._last)
+        self._restoring = True
+        try:
+            self.scene.load_from_dict(nxt)
+        except Exception as ex:
+            print("[redo] restore failed:", ex)
+            return 0
+        finally:
+            self._restoring = False
+        self._last = nxt
+        return len(self._redo)
+
+    def can_undo(self):
+        return bool(self._undo) or self._timer.isActive()
+
+    def can_redo(self):
+        return bool(self._redo)
+
+    def undo_depth(self):
+        return len(self._undo) + (1 if self._timer.isActive() else 0)
+
+    def redo_depth(self):
+        return len(self._redo)
+
+
 class MainWindow(QMainWindow):
     _MATH_CACHE = {}
     _RST_CACHE  = {}
@@ -5195,6 +5558,15 @@ class MainWindow(QMainWindow):
         self._setup_blocks()
         self._setup_help_dock()
 
+        # ---- undo / redo ---- #
+        self._undo_mgr = _UndoManager(self.scene)
+        QShortcut(QKeySequence("Ctrl+Z"), self,
+                  activated=self._on_undo)
+        QShortcut(QKeySequence("Ctrl+Y"), self,
+                  activated=self._on_redo)
+        QShortcut(QKeySequence("Ctrl+Shift+Z"), self,
+                  activated=self._on_redo)
+
         try:
             data = _load_settings()
             g = data.get("window_geometry")
@@ -5236,11 +5608,15 @@ class MainWindow(QMainWindow):
         self._act(m, "Quit",         "Ctrl+Q",       self.close)
 
         m = mb.addMenu("Edit")
+        self._act_undo = self._act(m, "Undo", "Ctrl+Z", self._on_undo)
+        self._act_redo = self._act(m, "Redo", "Ctrl+Y", self._on_redo)
+        m.addSeparator()
         self._act(m, "Duplicate",    "Ctrl+D",   self.view.duplicate_selected)
         self._act(m, "Delete",       "Del",      self.view.delete_selected)
         m.addSeparator()
         self._act(m, "Select All",   "Ctrl+A",   self.view.select_all)
         self._act(m, "Deselect All", "Alt+A",    lambda: self.scene.clearSelection())
+        m.aboutToShow.connect(self._sync_edit_menu)
 
         m = mb.addMenu("View")
         self._act(m, "Home",        "Home",    self._go_home)
@@ -5263,8 +5639,10 @@ class MainWindow(QMainWindow):
                     lambda checked=False, t=tpl: self._add_template_at_cursor(t))
 
         m = mb.addMenu("Tools")
-        self._act(m, "Convert Python project\u2026", None,
+        self._act(m, "Convert Python \u2192 PyTorchUI\u2026", None,
                   self._open_convert_dialog_menu)
+        self._act(m, "Convert PyTorchUI \u2192 Python\u2026", None,
+                  self._open_pyui_to_py_dialog)
         m.addSeparator()
         self._act(m, "Show output paths", None,
                   self._show_output_paths)
@@ -5394,6 +5772,67 @@ class MainWindow(QMainWindow):
             "database out:  %s" % (_OUTPUT_PATHS["db_output"] or "(cwd)"),
         ]
         QMessageBox.information(self, "Output Paths", "\n".join(lines))
+
+
+    def _open_py_to_pyui_dialog(self):
+        if PythonToPyUIDialog is None:
+            self.report(
+                "ConvertDialogs module not importable",
+                "error", 3000)
+            return
+        dlg = PythonToPyUIDialog(self)
+        dlg.exec_()
+
+    def _open_pyui_to_py_dialog(self):
+        if PyUIToPythonDialog is None:
+            self.report(
+                "ConvertDialogs module not importable",
+                "error", 3000)
+            return
+
+        def _provide(graph_dict):
+            # Save the current scene, load the graph, run codegen,
+            # restore.  Keeps the user's graph untouched.
+            try:
+                saved = self.scene.to_dict()
+            except Exception:
+                saved = None
+            try:
+                self.scene.load_from_dict(graph_dict)
+                return self._generate_code()
+            finally:
+                if saved is not None:
+                    try:
+                        self.scene.load_from_dict(saved)
+                    except Exception as ex:
+                        print("[convert] scene restore failed:", ex)
+
+        dlg = PyUIToPythonDialog(self, code_provider=_provide)
+        dlg.exec_()
+
+    def _on_undo(self):
+        n = self._undo_mgr.undo()
+        self._refresh_status()
+        if n or self._undo_mgr.can_redo():
+            self.report("Undo  (%d left)" % n, "info", 900)
+        else:
+            self.report("Nothing to undo", "debug", 900)
+
+    def _on_redo(self):
+        n = self._undo_mgr.redo()
+        self._refresh_status()
+        if n or self._undo_mgr.can_undo():
+            self.report("Redo  (%d left)" % n, "info", 900)
+        else:
+            self.report("Nothing to redo", "debug", 900)
+
+
+    def _sync_edit_menu(self):
+        try:
+            self._act_undo.setEnabled(self._undo_mgr.can_undo())
+            self._act_redo.setEnabled(self._undo_mgr.can_redo())
+        except Exception:
+            pass
 
 
     def _build_status_bar(self):
@@ -6802,6 +7241,13 @@ class MainWindow(QMainWindow):
                 return n
             if n.title == node_id:
                 return n
+            # Markers use _safe_safe_nid(n), which is the id if set,
+            # otherwise a whitespace-free version of the title.
+            try:
+                if _safe_safe_nid(n) == node_id:
+                    return n
+            except NameError:
+                pass
         return None
 
     def _clear_all_outputs(self):
@@ -7205,6 +7651,16 @@ class MainWindow(QMainWindow):
         kind = info.get("kind", "")
         path = info.get("path", "")
 
+        # Paint the payload on the node body as well as opening a
+        # dialog.  set_preview is defined on Node and picks a
+        # renderer by kind.
+        _node = self._node_by_id(nid)
+        if _node is not None and hasattr(_node, "set_preview"):
+            try:
+                _node.set_preview(info)
+            except Exception as ex:
+                print("[preview] set_preview failed:", ex)
+
         if kind in ("image", "plot"):
             if path and os.path.isfile(path):
                 self._show_image_dialog(nid, path)
@@ -7582,6 +8038,7 @@ class MainWindow(QMainWindow):
         def _kind(n):
             return n.metadata.get("kind") or _tpl(n).get("kind") or "call"
 
+
         def _cat(n):
             t = _tpl(n)
             for c, ts in NODE_TEMPLATES:
@@ -7931,8 +8388,15 @@ class MainWindow(QMainWindow):
                              % (pad, B.get("Name") or "'x'", val))
                 L.append("%s%s = None" % (pad, var))
                 return L, miss
+            if kind == "pyui_json":
+                _p = B.get("Path") or "'graph.json'"
+                imports.add("import json")
+                L.append("%s%s = json.load(open(%s, 'r', "
+                         "encoding='utf-8'))" % (pad, var, _p))
+                return L, miss
+
             if kind == "io":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = _ask(%r, %s)"
                          % (pad, var, _nid, B.get("Prompt") or "''"))
                 return L, miss
@@ -7955,7 +8419,7 @@ class MainWindow(QMainWindow):
                 L.append("%s%s = None" % (pad, var))
                 return L, miss
             if kind == "preview_image":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_image(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
@@ -7967,7 +8431,7 @@ class MainWindow(QMainWindow):
                 L.append("%s    normalize=%s)" % (pad, B.get("Normalize") or "True"))
                 return L, miss
             if kind == "preview_audio":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_audio(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
@@ -7978,7 +8442,7 @@ class MainWindow(QMainWindow):
                 L.append("%s    start=%s)" % (pad, B.get("Start") or "0.0"))
                 return L, miss
             if kind == "preview_video":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_video(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
@@ -7990,7 +8454,7 @@ class MainWindow(QMainWindow):
                 L.append("%s    muted=%s)" % (pad, B.get("Muted") or "False"))
                 return L, miss
             if kind == "preview_folder":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_folder(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    source=%s," % (pad, B.get("Source") or "'.'"))
@@ -8001,7 +8465,7 @@ class MainWindow(QMainWindow):
                 L.append("%s    sort=%s)" % (pad, B.get("Sort") or "'name'"))
                 return L, miss
             if kind == "preview_table":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_table(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
@@ -8011,7 +8475,7 @@ class MainWindow(QMainWindow):
                 L.append("%s    editable=%s)" % (pad, B.get("Editable") or "False"))
                 return L, miss
             if kind == "preview_text":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_text(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
@@ -8022,7 +8486,7 @@ class MainWindow(QMainWindow):
                 L.append("%s    highlight=%s)" % (pad, B.get("Highlight") or "''"))
                 return L, miss
             if kind == "preview_json":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_json(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    source=%s," % (pad, B.get("Source") or "None"))
@@ -8032,7 +8496,7 @@ class MainWindow(QMainWindow):
                 L.append("%s    max_depth=%s)" % (pad, B.get("MaxDepth") or "20"))
                 return L, miss
             if kind == "preview_plot":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_plot(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    x=%s," % (pad, B.get("X") or "None"))
@@ -8046,7 +8510,7 @@ class MainWindow(QMainWindow):
                 L.append("%s    figsize_h=%s)" % (pad, B.get("FigsizeH") or "5.0"))
                 return L, miss
             if kind == "preview_html":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_html(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    source=%s," % (pad, B.get("Source") or "''"))
@@ -8054,7 +8518,7 @@ class MainWindow(QMainWindow):
                 L.append("%s    height=%s)" % (pad, B.get("Height") or "400"))
                 return L, miss
             if kind == "preview_markdown":
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 L.append("%s%s = runtime.preview_markdown(" % (pad, var))
                 L.append("%s    %r," % (pad, _nid))
                 L.append("%s    source=%s," % (pad, B.get("Source") or "''"))
@@ -8063,7 +8527,7 @@ class MainWindow(QMainWindow):
                 return L, miss
 
             if kind in ("image_viewer", "audio_player", "video_player"):
-                _nid = n.metadata.get("id") or n.title
+                _nid = _safe_nid(n)
                 _k = {"image_viewer": "image",
                       "audio_player": "audio",
                       "video_player": "video"}[kind]
@@ -8301,7 +8765,7 @@ class MainWindow(QMainWindow):
         def emit(n, indent):
             pad = "    " * indent
             kind = _kind(n)
-            nid = n.metadata.get("id") or n.title
+            nid = _safe_nid(n)
             var = var_of[id(n)]
             B, _miss = _binds(n)
             L = []
@@ -9255,6 +9719,13 @@ class _NodeRegistrar:
             NODE_TEMPLATES.append((_cat, _tpls))
             for _t in _tpls:
                 _TEMPLATE_BY_NAME[_t["name"]] = _t
+
+        # Collapse any same-named entries so find_template() returns
+        # the newest one.
+        try:
+            _dedupe_templates()
+        except NameError:
+            pass
 
         self._api.window.library.refresh()
 
@@ -10410,6 +10881,25 @@ class ConvertDialog(QDialog):
         self.lbl_status.setStyleSheet("color:#8A8A8A;")
         v.addWidget(self.lbl_status)
 
+        # ---- output pane ---- #
+        self.lbl_output = QLabel("Output")
+        self.lbl_output.setStyleSheet(
+            "color:#7F7F7F;font-weight:bold;letter-spacing:1px;"
+            "font-size:10px;")
+        v.addWidget(self.lbl_output)
+
+        self.edit_output = QPlainTextEdit()
+        self.edit_output.setReadOnly(True)
+        self.edit_output.setFixedHeight(140)
+        self.edit_output.setStyleSheet(
+            "QPlainTextEdit{background:#141414;color:#DDD;"
+            " border:1px solid #2A2A2A;padding:6px;"
+            " font-family:'JetBrains Mono','Consolas',monospace;"
+            " font-size:11px;}")
+        v.addWidget(self.edit_output)
+
+        self._output_log_path = ""
+
         # ---- buttons ---- #
         row = QHBoxLayout()
         b_scan = QPushButton("Scan")
@@ -10673,55 +11163,172 @@ class ConvertDialog(QDialog):
 
     # ---- convert ---- #
 
+    def _log(self, line):
+        """Append a line to the output pane and to the log file."""
+        try:
+            self.edit_output.appendPlainText(str(line))
+            sb = self.edit_output.verticalScrollBar()
+            sb.setValue(sb.maximum())
+        except Exception:
+            pass
+        try:
+            if self._output_log_path:
+                with open(self._output_log_path, "a",
+                          encoding="utf-8") as f:
+                    f.write(str(line) + "\n")
+        except Exception:
+            pass
+        QApplication.processEvents()
+
+    def _log_clear(self):
+        try:
+            self.edit_output.clear()
+        except Exception:
+            pass
+
     def _convert(self):
+        import time
+        import subprocess as _sp
+
         folder = self.edit_folder.text().strip()
         out = self.edit_out.text().strip()
+
         if not out:
             self._pick_output()
             out = self.edit_out.text().strip()
         if not out:
             return
 
+        if os.path.isdir(out):
+            ext = ".db" if self.rb_db.isChecked() else ".json"
+            out = os.path.join(out, "converted" + ext)
+            self.edit_out.setText(out)
+
         fmt = "db" if self.rb_db.isChecked() else "json"
         python = self.edit_python.text().strip() or "python"
 
-        # Build the create.py invocation.  It must be run in the
-        # PyTorchUI root so it can find its own helpers.
+        parent = os.path.dirname(os.path.abspath(out))
+        if parent and not os.path.isdir(parent):
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except Exception as ex:
+                self._log("! could not create %s: %s" % (parent, ex))
+                return
+
+        self._output_log_path = out + ".log"
+        try:
+            with open(self._output_log_path, "w",
+                      encoding="utf-8") as f:
+                f.write("# Convert log\n")
+        except Exception:
+            self._output_log_path = ""
+
+        self._log_clear()
+        self._log("# Convert Python project")
+        self._log("# Folder:  %s" % folder)
+        self._log("# Output:  %s" % out)
+        self._log("# Format:  %s" % fmt)
+        self._log("# Python:  %s" % python)
+        self._log("")
+
         root = os.path.dirname(os.path.abspath(__file__))
         while not os.path.isfile(os.path.join(root, "create.py")):
             parent = os.path.dirname(root)
             if parent == root:
-                from PyQt5.QtWidgets import QMessageBox
-                QMessageBox.critical(
-                    self, "Convert",
-                    "Could not locate create.py relative to the editor.")
+                self._log("! could not locate create.py")
+                self.lbl_status.setText("create.py not found")
                 return
             root = parent
 
         create_py = os.path.join(root, "create.py")
-        args = [python, create_py, "--format", fmt,
-                "--quiet",
+        args = [python, create_py, "--format", fmt, "--quiet",
                 "--db-path" if fmt == "db" else "--json-path", out,
                 "-o", out + ".loader.py"]
         for lib in self._external:
             args.extend(["-l", lib])
 
+        self._log("$ " + " ".join(
+            ("'%s'" % a if " " in a else a) for a in args))
+        self._log("")
+
         self.lbl_status.setText("Running create.py\u2026")
         QApplication.processEvents()
-        r = subprocess.run(args)
-        if r.returncode != 0:
-            self.lbl_status.setText("create.py failed (%d)" % r.returncode)
+
+        t0 = time.monotonic()
+        try:
+            proc = _sp.Popen(
+                args,
+                stdout=_sp.PIPE,
+                stderr=_sp.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=root,
+            )
+        except Exception as ex:
+            self._log("! failed to start: %s" % ex)
+            self.lbl_status.setText("Launch failed")
             return
 
-        self.lbl_status.setText("Wrote %s" % out)
-        from PyQt5.QtWidgets import QMessageBox
-        QMessageBox.information(
-            self, "Convert",
-            "Wrote:\n  %s\n  %s.loader.py" % (out, out))
-        self.accept()
+        for line in iter(proc.stdout.readline, ""):
+            self._log(line.rstrip("\n"))
+        proc.stdout.close()
+        code = proc.wait()
+        dt = time.monotonic() - t0
+
+        self._log("")
+        self._log("# exited %d in %.2fs" % (code, dt))
+
+        if code != 0:
+            self.lbl_status.setText(
+                "create.py failed (exit %d) after %.1fs" % (code, dt))
+            self.lbl_status.setStyleSheet("color:#D9534F;")
+            return
+
+        if not os.path.isfile(out):
+            self._log("! create.py reported success but %s is missing"
+                      % out)
+            self.lbl_status.setText("Output file missing after run")
+            self.lbl_status.setStyleSheet("color:#D9534F;")
+            return
+
+        size = os.path.getsize(out)
+        self._log("")
+        self._log("# wrote %s (%d bytes)" % (out, size))
+        self._log("# log saved to %s" % self._output_log_path)
+
+        self.lbl_status.setStyleSheet("color:#5CB85C;")
+        self.lbl_status.setText(
+            "Wrote %s (%d bytes) in %.1fs"
+            % (os.path.basename(out), size, dt))
+
+        try:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Convert complete",
+                "Wrote:\n  %s\n  %s.loader.py\n\n"
+                "Log:\n  %s"
+                % (out, out, self._output_log_path))
+        except Exception:
+            pass
 
 
 
+
+
+# ---------------------------------------------------------------- #
+#  Two-way converters                                              #
+# ---------------------------------------------------------------- #
+
+try:
+    from helpers.Nodes.ConvertDialogs import (
+        PythonToPyUIDialog, PyUIToPythonDialog)
+except ImportError:
+    try:
+        from ConvertDialogs import (
+            PythonToPyUIDialog, PyUIToPythonDialog)
+    except ImportError:
+        PythonToPyUIDialog = None
+        PyUIToPythonDialog = None
 
 _install_nodehost()
 

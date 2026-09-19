@@ -142,3 +142,5 @@ generated.py
 *.pyc
 edit.py
 dos.sh
+diag.py
+

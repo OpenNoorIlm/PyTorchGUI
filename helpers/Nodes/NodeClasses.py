@@ -1358,6 +1358,49 @@ class _NodeWidgetHost:
         except Exception:
             pass
 
+    def _show_preview_button(self):
+        """Open the full preview dialog for the payload on this node."""
+        win = self._view_window()
+        if win is None:
+            return
+        info = getattr(self, "_preview_info", None) or {}
+        if not info:
+            try:
+                from PyQt5.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    win, "No preview yet",
+                    "Run the pipeline (F5) first.  This node "
+                    "populates as soon as its Source produces media.")
+            except Exception:
+                pass
+            return
+        kind = info.get("kind", "")
+        nid = self.metadata.get("id") or self.title
+        try:
+            if kind in ("image", "plot"):
+                path = info.get("path", "")
+                if path and os.path.isfile(path):
+                    win._show_image_dialog(nid, path)
+                else:
+                    print("[preview] no image file at", path)
+            elif kind in ("audio", "video"):
+                path = info.get("path", "")
+                if path and os.path.isfile(path):
+                    win._show_media_player(nid, path, kind)
+            elif kind == "folder":
+                win._show_folder_dialog(nid, info)
+            elif kind == "table":
+                win._show_table_dialog(nid, info)
+            elif kind in ("text", "json"):
+                win._show_text_dialog(nid, info, mono=True)
+            elif kind in ("html", "markdown"):
+                win._show_html_dialog(nid, info)
+            else:
+                print("[preview] unknown kind:", kind)
+        except Exception as ex:
+            print("[preview] show failed:", ex)
+
+
     def _view_window(self):
         try:
             v = self.scene().views()

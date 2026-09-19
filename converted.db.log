@@ -1,0 +1,16 @@
+# Convert log
+# Convert Python project
+# Folder:  /home/bismillah/Downloads/PyTorchUI
+# Output:  /home/bismillah/Downloads/PyTorchUI/converted.db
+# Format:  db
+# Python:  /usr/bin/python
+
+$ /usr/bin/python /home/bismillah/Downloads/PyTorchUI/create.py --format db --quiet --db-path /home/bismillah/Downloads/PyTorchUI/converted.db -o /home/bismillah/Downloads/PyTorchUI/converted.db.loader.py -l PIL -l PyQt5 -l Xlib -l matplotlib -l pyautogui -l torch
+
+  opening /home/bismillah/Downloads/PyTorchUI/converted.db
+  total 5494 nodes, 5494 new, 0 updated, 0 unchanged
+
+# exited 0 in 8.47s
+
+# wrote /home/bismillah/Downloads/PyTorchUI/converted.db (8093696 bytes)
+# log saved to /home/bismillah/Downloads/PyTorchUI/converted.db.log
