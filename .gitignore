@@ -154,6 +154,7 @@ $RECYCLE.BIN/
 data/
 .pytorchui/
 autosave.json
+main.db
 generated.py
 *.bak_*
 **/__pycache__/
