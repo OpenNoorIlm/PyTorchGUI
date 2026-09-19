@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """
-fix_qts_aggregator.py — route C-extension objects to their real home.
+route_by_module.py — categorise objects by their real __module__.
 
-PyQt5.Qt re-exports the entire Qt API from QtCore, QtGui, QtWidgets,
-etc.  Because it is walked first (alphabetically), it steals every
-name and marks them seen, so the real modules find nothing to add.
+Replaces collect_from_module with a version that, when a class or
+function is discovered in a module that is not its definition site,
+writes the row under the deeper module's category.
 
-Fix: inside _collect_from_c_extension, look at obj.__module__.  If it
-points to a specific PyQt5.* submodule, use that for the category
-instead of the walker's assignment.  So a QObject found via PyQt5.Qt
-still ends up under PyQt5/QtCore.
+So torch.nn.Conv2d (discovered in torch.nn, defined in
+torch.nn.modules.conv) is registered as:
+
+    category  Torch/nn/modules/conv
+
+instead of
+
+    category  Torch/nn
+
+The old behaviour:  the shallow module ate every name and marked it
+seen, so the deep module found nothing left to add.  The new
+behaviour:  the shallow module still walks first, but the row lands
+where the class is actually defined.
 
 Run:
     python3 edit.py
@@ -27,49 +36,84 @@ import sys
 PATH = "create.py"
 
 
-NEW_COLLECT_CEXT = '''\
-def _collect_from_c_extension(mod, mod_path, cat, seen_names,
-                              specs_out, limit, exc_only, deep=False):
-    """Enumerate classes and functions from a compiled extension.
+# The full replacement.  Kept as one triple-quoted string with a
+# plain r-prefix so backslashes in regexes are literal.
 
-    Re-exports are a real problem: PyQt5.Qt contains the whole Qt
-    API copied from QtCore, QtGui, etc.  We route each object to the
-    category named by its own __module__ when that points to a
-    specific PyQt5.* submodule, so QObject lands under PyQt5/QtCore
-    even when discovered via PyQt5.Qt.
-    """
+NEW_COLLECT = r'''def collect_from_module(cat, mod_path, seen_names, specs_out, limit,
+                        deep_c=False):
+    if len(specs_out) >= limit:
+        return 0
+    if _DEBUG:
+        print("[debug] collect %-45s cat=%s" % (mod_path, cat))
+    mod = _safe_import(mod_path)
+    if mod is None:
+        if _DEBUG:
+            print("[debug]   import failed")
+        return 0
+
+    exc_only = mod_path in _EXCEPTIONS_ONLY_ROOTS
+
+    if _is_c_extension(mod_path):
+        if _DEBUG:
+            print("[debug]   -> C-extension path")
+        n = _collect_from_c_extension(
+            mod, mod_path, cat, seen_names, specs_out, limit,
+            exc_only, deep=deep_c)
+        if _DEBUG:
+            print("[debug]   collected %d" % n)
+        return n
+
+    top_level = "." not in mod_path
+    root = mod_path.split(".")[0]
+    real_root = getattr(mod, "__name__", root).split(".")[0]
+    roots = {root, real_root}
     added = 0
-    try:
-        members = list(vars(mod).items())
-    except Exception:
-        members = []
-
-    for name, obj in members:
+    for name in dir(mod):
         if len(specs_out) >= limit:
             break
         if name.startswith("_"):
             continue
         if name in seen_names:
             continue
+        try:
+            obj = getattr(mod, name)
+        except BaseException:
+            continue
         if not (inspect.isclass(obj) or inspect.isroutine(obj)):
             continue
+
+        real_mod = getattr(obj, "__module__", "") or ""
+
+        # Keep only objects defined inside this package.  Objects
+        # whose real module is unrelated (a helper imported from
+        # somewhere else) are dropped.
+        if not top_level:
+            if real_mod and not any(real_mod.startswith(r)
+                                    for r in roots):
+                if _DEBUG:
+                    print("[debug]   drop %-30s __module__=%r"
+                          % (name, real_mod))
+                continue
+
+        # ---- the routing step ---- #
+        # If the object's real module is a deeper path inside the
+        # same package, categorise the node there instead of under
+        # the module we happened to find it in.
+        spec_cat = cat
+        if (real_mod
+                and real_mod != mod_path
+                and not real_mod.startswith("sip")
+                and not real_mod.startswith("PyQt5.sip")
+                and "." in real_mod
+                and any(real_mod.startswith(r) for r in roots)):
+            spec_cat = real_mod.replace(".", "/")
+            if _DEBUG:
+                print("[debug]   route %-24s -> %s"
+                      % (name, spec_cat))
 
         is_exc = _is_exception_class(obj)
         if exc_only and not is_exc:
             continue
-
-        # ---- category routing ---- #
-        # Prefer the object's own __module__ when it points to a
-        # specific module inside the same package.  Ignore SIP
-        # placeholders and the empty string.
-        spec_cat = cat
-        real_mod = getattr(obj, "__module__", None) or ""
-        if (real_mod
-                and real_mod != mod_path
-                and "." in real_mod
-                and not real_mod.startswith("sip")
-                and not real_mod.startswith("PyQt5.sip")):
-            spec_cat = real_mod.replace(".", "/")
 
         seen_names.add(name)
 
@@ -97,44 +141,21 @@ def _collect_from_c_extension(mod, mod_path, cat, seen_names,
 
         specs_out.append(spec)
         added += 1
+        if _DEBUG:
+            print("[debug]     + %-30s (cat=%s)" % (name, spec_cat))
 
-        if deep and inspect.isclass(obj) and len(specs_out) < limit:
-            try:
-                inner = list(vars(obj).items())
-            except Exception:
-                inner = []
-            for inner_name, inner_obj in inner:
-                if inner_name.startswith("_"):
-                    continue
-                full_inner = "%s.%s" % (name, inner_name)
-                if full_inner in seen_names:
-                    continue
-                if not (inspect.isclass(inner_obj)
-                        or inspect.isroutine(inner_obj)):
-                    continue
-                seen_names.add(full_inner)
-                sub = {
-                    "name":        full_inner,
-                    "color":       color_for(spec_cat),
-                    "category":    spec_cat,
-                    "description": get_doc(inner_obj),
-                    "qualname":    ("%s.%s" % (qualname, inner_name))
-                                   if qualname else None,
-                    "inputs":      get_params(inner_obj),
-                    "outputs":     [(inner_name, "object",
-                                     "Nested attribute of %s.%s"
-                                     % (mod_path, name))],
-                    "full_path":   "%s.%s.%s" % (mod_path, name, inner_name),
-                }
-                specs_out.append(sub)
-                added += 1
-
+    if _DEBUG:
+        print("[debug]   collected %d" % added)
     return added
 '''
 
 
 def _function_range(src, name):
-    tree = ast.parse(src)
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        print("  ! create.py does not parse: %s" % e)
+        return None
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             start = node.lineno - 1
@@ -163,26 +184,30 @@ def main():
     with open(PATH, "r", encoding="utf-8") as f:
         src = f.read()
 
-    if "__module__ routing" in src or (
-            'real_mod = getattr(obj, "__module__", None) or ""' in src
-            and "spec_cat = real_mod.replace" in src):
-        print("  [ok] already patched")
+    if "spec_cat = real_mod.replace" in src:
+        print("  [ok] routing already present in collect_from_module")
         return
 
-    src, ok = replace_function(
-        src, "_collect_from_c_extension", NEW_COLLECT_CEXT)
-    print("  _collect_from_c_extension replaced:", ok)
+    new_src, ok = replace_function(src, "collect_from_module", NEW_COLLECT)
+    print("  collect_from_module replaced:", ok)
     if not ok:
         print()
-        print("Function not found — paste create.py.")
+        print("Function not found — paste create.py and retarget.")
         sys.exit(1)
 
-    backup = PATH + ".bak_qts"
+    # Verify the resulting file parses.
+    try:
+        ast.parse(new_src)
+    except SyntaxError as e:
+        print("  ! new source does not parse: %s" % e)
+        sys.exit(1)
+
+    backup = PATH + ".bak_routing"
     shutil.copy(PATH, backup)
     print("  backup ->", backup)
 
     with open(PATH, "w", encoding="utf-8") as f:
-        f.write(src)
+        f.write(new_src)
 
     try:
         py_compile.compile(PATH, doraise=True)
@@ -195,25 +220,27 @@ def main():
 
     print()
     print("=" * 62)
-    print("Now rebuild the DB from scratch:")
+    print("Rebuild from scratch:")
     print("=" * 62)
     print()
     print("    rm main.db")
     print("    bash build.sh")
     print()
-    print("The 'rm main.db' is important — the append-only logic keeps")
-    print("the 18606 rows already mis-categorised under PyQt5/Qt.  A")
-    print("fresh build replaces them with correctly-routed rows.")
+    print("The rm is required — append-only would keep the existing")
+    print("rows under their old categories.")
     print()
-    print("After the build, verify:")
+    print("After the build, verify with:")
     print()
-    print("    python3 -c \"import sqlite3; c=sqlite3.connect('main.db');"
-          " [print(r) for r in c.execute('SELECT category, COUNT(*) "
-          "FROM nodes WHERE category LIKE \\\"PyQt5/Qt%\\\" "
-          "GROUP BY category ORDER BY 2 DESC LIMIT 15')]\"")
+    print("    python3 -c \"import sqlite3; c=sqlite3.connect('main.db');\\")
+    print("      [print('%-46s %d' % r) for r in c.execute(\\")
+    print("      'SELECT category, COUNT(*) FROM nodes \\")
+    print("       WHERE category LIKE \\\"Torch/nn%\\\" \\")
+    print("       GROUP BY category ORDER BY 2 DESC LIMIT 12')]\"")
     print()
-    print("Expected: PyQt5/QtCore, PyQt5/QtGui, PyQt5/QtWidgets each")
-    print("with 100-400 nodes, and PyQt5/Qt with only a handful.")
+    print("Expected: Torch/nn shrinks to a handful of torch-specific")
+    print("helpers (ModuleList, Sequential, etc. defined in __init__),")
+    print("and Torch/nn/modules/conv, .../linear, .../activation each")
+    print("get their real counts.")
 
 
 if __name__ == "__main__":
